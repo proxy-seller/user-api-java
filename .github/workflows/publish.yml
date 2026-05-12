@@ -1,0 +1,30 @@
+name: Publish to Maven Central
+
+on:
+  workflow_dispatch:
+  release:
+    types: [published]
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 11
+        uses: actions/setup-java@v4
+        with:
+          java-version: '11'
+          distribution: 'temurin'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v3
+
+      - name: Decode gradle.properties
+        run: |
+          mkdir -p ~/.gradle
+          echo "${{ secrets.GRADLE_PROPS }}" | base64 -d > ~/.gradle/gradle.properties
+
+      - name: Publish
+        run: gradle publish
