@@ -4,15 +4,28 @@ import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
-/** Full payload accepted by {@code prolong/calc} and {@code prolong/make}. */
+/**
+ * Full payload accepted by {@code prolong/calc} and {@code prolong/make}.
+ *
+ * <p>{@code periodId} and {@code paymentId} accept <b>an ObjectId or the matching code</b> — the
+ * server falls back to a code lookup when the value is not a valid id and the paired {@code *Code}
+ * field is empty. Setting a {@code *Code} field drops the paired {@code *Id} from the payload.
+ */
 public class ProlongOptions {
+    /** IP address ids to renew (ObjectId strings). */
     public Collection<String> ids;
+    /** Order separator ids of a MIX order to renew (ObjectId strings). */
     public Collection<String> orderSeparatorIds;
+    /** A single MIX order separator id (ObjectId string). */
     public String orderSeparatorId;
     public String coupon;
+    /** Period ObjectId, or the period code ({@code 1m}); lower-cased server-side. */
     public String periodId;
+    /** Period code ({@code 1w}, {@code 1m}, {@code 3m}). Not returned by {@code reference/list}. */
     public String periodCode;
+    /** Payment system ObjectId, or a payment code ({@code balance}). */
     public String paymentId;
+    /** Payment code ({@code balance}). Not returned by {@code balance/payments/list}. */
     public String paymentCode;
 
     public Map<Object, Object> toMap() {

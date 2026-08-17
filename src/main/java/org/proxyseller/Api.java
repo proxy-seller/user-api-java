@@ -33,8 +33,18 @@ import java.util.stream.Collectors;
  * {@link ApiException#getErrors()} to read the whole array, because access failures come as
  * a fixed triple that only the array distinguishes.
  *
- * <p>All ids are MongoDB ObjectId <b>strings</b>. The single exception is the resident list
- * id, which stayed numeric — see {@link #residentList()}.
+ * <p>All ids are MongoDB ObjectId <b>strings</b>. Two exceptions: the resident list id, which
+ * stayed numeric (see {@link #residentList()}), and {@code rotationId}, which is a rotation
+ * interval in <b>minutes</b> ({@code 0} = By Link) and never an id at all.
+ *
+ * <p>Every reference {@code *Id} field of {@code order/*} and {@code prolong/*} also accepts the
+ * matching <b>code</b>: when the value is not a valid id and the paired {@code *Code} field is
+ * empty, the server resolves it as a code. That holds for {@code countryId} (alpha-3, upper-cased),
+ * {@code periodId} (lower-cased), {@code paymentId}, {@code operatorId} (tag), {@code mixId} (tag)
+ * and {@code tarifId} — so a code can be passed straight into the positional argument.
+ * {@code rotationId} is the exception and has no code form. {@code reference/list} only returns a
+ * code for the country ({@code alpha3}); for a period, an operator, a mix, a tariff and a payment
+ * system it returns the id alone.
  *
  * <p><b>Android is not supported.</b> Four endpoints ({@code auth/delete},
  * {@code resident/list/delete}, {@code residentsubuser/delete} and
@@ -72,10 +82,14 @@ public class Api {
     }
 
     /**
-     * Payment system id (MongoDB ObjectId from balance/payments/list).
-     * For the inner balance you can also use setPaymentCode("balance").
+     * Payment system id (MongoDB ObjectId from {@code balance/payments/list}).
      *
-     * @param paymentId payment system id
+     * <p>On {@code order/*} and {@code prolong/*} this field also accepts a payment
+     * <b>code</b> ({@code balance}) — the server falls back to a code lookup when the value
+     * is not a valid id. {@code balance/add} resolves ids only, in either field.
+     * For the inner balance you can also use {@code setPaymentCode("balance")}.
+     *
+     * @param paymentId payment system ObjectId, or a payment code on order/prolong
      */
     public void setPaymentId(String paymentId) {
         this.paymentId = paymentId;
@@ -90,7 +104,11 @@ public class Api {
 
     /**
      * Stable payment system code, for example {@code balance}. Codes are
-     * preferable to environment-specific MongoDB ids.
+     * preferable to environment-specific MongoDB ids. Resolved by {@code order/*} and
+     * {@code prolong/*}; {@code balance/add} needs an id — see {@link #balanceAdd(Double)}.
+     *
+     * <p>{@code balance/payments/list} returns only {@code id} and {@code name}, so a payment
+     * code is something you have to know, not something the reference hands you.
      *
      * @param paymentCode stable payment system code
      */
@@ -714,6 +732,15 @@ public class Api {
     /**
      * Get necessary guides for creating an order (all types).
      *
+     * <p>What it really returns, per section: {@code country[]} with {@code id}, {@code name} and
+     * {@code alpha3} (the only code in the whole response), {@code period[]} with {@code id} and
+     * {@code name}, mobile operators with {@code id}, {@code name} and
+     * {@code rotations[{id, name}]} where {@code id} is the rotation in <b>minutes</b>
+     * ({@code 0} = {@code "By Link"}), mix {@code quantities[]} with {@code id}, {@code name} and
+     * {@code quantities}, and resident {@code tarifs[]} with {@code id}, {@code name},
+     * {@code personal}. There is no {@code periodCode}, {@code operatorCode}, {@code tarifCode} or
+     * {@code paymentCode} field anywhere in the response — for those, use the id.
+     *
      * @return The necessary guides for creating an order.
      * @throws Exception Error
      */
@@ -724,12 +751,15 @@ public class Api {
     /**
      * Calculate the order IPv4.
      *
-     * @param countryId        The ID of the country (ObjectId or country code)
-     * @param periodId         The ID of the period
+     * @param countryId        Country ObjectId, or the alpha-3 country code ({@code USA})
+     * @param periodId         Period ObjectId, or the period code ({@code 1w}, {@code 1m}, {@code 3m})
      * @param quantity         The quantity of the order
      * @param authorization    IP whitelist (if need)
      * @param coupon           The coupon code
-     * @param customTargetName The custom target name
+     * @param customTargetName The custom target name — mandatory for ipv4/ipv6/isp, and for a
+     *                         mix order that does not resolve to a package; the SDK rejects the
+     *                         call locally instead of letting the server answer
+     *                         {@code Incorrect goal} (code 14)
      * @return An array containing the order details
      * @throws Exception Error
      */
@@ -748,12 +778,15 @@ public class Api {
     /**
      * Calculate the order ISP.
      *
-     * @param countryId        The ID of the country (ObjectId or country code)
-     * @param periodId         The ID of the period
+     * @param countryId        Country ObjectId, or the alpha-3 country code ({@code USA})
+     * @param periodId         Period ObjectId, or the period code ({@code 1w}, {@code 1m}, {@code 3m})
      * @param quantity         The quantity of the order
      * @param authorization    IP whitelist (if need)
      * @param coupon           The coupon code
-     * @param customTargetName The custom target name
+     * @param customTargetName The custom target name — mandatory for ipv4/ipv6/isp, and for a
+     *                         mix order that does not resolve to a package; the SDK rejects the
+     *                         call locally instead of letting the server answer
+     *                         {@code Incorrect goal} (code 14)
      * @return An array containing the order details
      * @throws Exception Error
      */
@@ -772,12 +805,15 @@ public class Api {
     /**
      * Calculate the order MIX.
      *
-     * @param mixId            The MIX package ID
-     * @param periodId         The ID of the period
+     * @param mixId            MIX package ObjectId, or the package tag
+     * @param periodId         Period ObjectId, or the period code ({@code 1w}, {@code 1m}, {@code 3m})
      * @param quantity         The quantity of the order
      * @param authorization    IP whitelist (if need)
      * @param coupon           The coupon code
-     * @param customTargetName The custom target name
+     * @param customTargetName The custom target name — mandatory for ipv4/ipv6/isp, and for a
+     *                         mix order that does not resolve to a package; the SDK rejects the
+     *                         call locally instead of letting the server answer
+     *                         {@code Incorrect goal} (code 14)
      * @return An array containing the order details
      * @throws Exception Error
      */
@@ -791,7 +827,17 @@ public class Api {
         return orderCalcMix(mixId, periodId, quantity, authorization, coupon, customTargetName);
     }
 
-    /** Calculate a MIX order using stable reference codes. */
+    /**
+     * Calculate a MIX order using stable reference codes.
+     *
+     * @param mixCode    MIX package tag (exact match). {@code reference/list} exposes it as
+     *                   {@code country[].tag} of the {@code mix}/{@code mix_isp} section
+     * @param periodCode Period code ({@code 1w}, {@code 1m}, {@code 3m}) — not returned by
+     *                   {@code reference/list}, which only has {@code period[].id}/{@code name}
+     * @param quantity   The quantity of the order
+     * @return An array containing the order details
+     * @throws Exception Error
+     */
     public Map orderCalcMixByCode(String mixCode, String periodCode, Long quantity) throws Exception {
         OrderOptions options = new OrderOptions();
         options.sectionCode = "mix";
@@ -804,12 +850,15 @@ public class Api {
     /**
      * Calculate the order IPv6.
      *
-     * @param countryId        The ID of the country (ObjectId or country code)
-     * @param periodId         The ID of the period
+     * @param countryId        Country ObjectId, or the alpha-3 country code ({@code USA})
+     * @param periodId         Period ObjectId, or the period code ({@code 1w}, {@code 1m}, {@code 3m})
      * @param quantity         The quantity of the order
      * @param authorization    IP whitelist (if need)
      * @param coupon           The coupon code
-     * @param customTargetName The custom target name
+     * @param customTargetName The custom target name — mandatory for ipv4/ipv6/isp, and for a
+     *                         mix order that does not resolve to a package; the SDK rejects the
+     *                         call locally instead of letting the server answer
+     *                         {@code Incorrect goal} (code 14)
      * @param protocol         HTTPS or SOCKS5
      * @return An array containing the order details
      * @throws Exception Error
@@ -821,13 +870,17 @@ public class Api {
     /**
      * Calculate the order Mobile.
      *
-     * @param countryId     The ID of the country (ObjectId or country code)
-     * @param periodId      The ID of the period
+     * @param countryId     Country ObjectId, or the alpha-3 country code ({@code USA})
+     * @param periodId      Period ObjectId, or the period code ({@code 1w}, {@code 1m}, {@code 3m})
      * @param quantity      The quantity of the order
      * @param authorization IP whitelist (if need)
      * @param coupon        The coupon code
-     * @param operatorId    The mobile operator id
-     * @param rotationId    The rotation id
+     * @param operatorId    Mobile operator ObjectId, or the operator tag
+     * @param rotationId    Rotation interval in <b>minutes</b> as a decimal string
+     *                      ({@code "5"}, {@code "10"}, {@code "0"} = By Link). This field
+     *                      has no code form: {@code "5m"} or an ObjectId is rejected.
+     *                      The value comes from {@code reference/list} as
+     *                      {@code country[].operators.*[].rotations[].id}
      * @return An array containing the order details
      * @throws Exception Error
      */
@@ -838,6 +891,22 @@ public class Api {
     /**
      * Calculate a mobile order and explicitly select {@code shared} or
      * {@code dedicated} service.
+     *
+     * <p>Codes go into the positional arguments; {@code rotationId} is minutes, not a code:
+     * <pre>{@code
+     * api.orderCalcMobile("USA", "1m", 1L, null, null, operatorId, "5", "dedicated");
+     * }</pre>
+     *
+     * @param countryId         Country ObjectId, or the alpha-3 country code ({@code USA})
+     * @param periodId          Period ObjectId, or the period code ({@code 1m})
+     * @param quantity          The quantity of the order
+     * @param authorization     IP whitelist (if need)
+     * @param coupon            The coupon code
+     * @param operatorId        Mobile operator ObjectId, or the operator tag
+     * @param rotationId        Rotation interval in <b>minutes</b> ({@code "0"} = By Link), no code form
+     * @param mobileServiceType {@code shared} or {@code dedicated}
+     * @return An array containing the order details
+     * @throws Exception Error
      */
     public Map orderCalcMobile(String countryId, String periodId, Long quantity, String authorization,
                                String coupon, String operatorId, String rotationId,
@@ -849,7 +918,7 @@ public class Api {
     /**
      * Calculate the order Resident.
      *
-     * @param tarifId The tarif id
+     * @param tarifId Resident tariff ObjectId, or the tariff code (exact match)
      * @param coupon  The coupon code
      * @return An array containing the order details
      * @throws Exception Error
@@ -862,12 +931,15 @@ public class Api {
      * Create an order IPv4.
      * Attention! Calling this method will deduct $ from your balance!
      *
-     * @param countryId        The ID of the country (ObjectId or country code)
-     * @param periodId         The ID of the period
+     * @param countryId        Country ObjectId, or the alpha-3 country code ({@code USA})
+     * @param periodId         Period ObjectId, or the period code ({@code 1w}, {@code 1m}, {@code 3m})
      * @param quantity         The quantity of the order
      * @param authorization    IP whitelist (if need)
      * @param coupon           The coupon code
-     * @param customTargetName The custom target name
+     * @param customTargetName The custom target name — mandatory for ipv4/ipv6/isp, and for a
+     *                         mix order that does not resolve to a package; the SDK rejects the
+     *                         call locally instead of letting the server answer
+     *                         {@code Incorrect goal} (code 14)
      * @return An array containing the order details
      * @throws Exception Error
      */
@@ -887,12 +959,15 @@ public class Api {
      * Create an order ISP.
      * Attention! Calling this method will deduct $ from your balance!
      *
-     * @param countryId        The ID of the country (ObjectId or country code)
-     * @param periodId         The ID of the period
+     * @param countryId        Country ObjectId, or the alpha-3 country code ({@code USA})
+     * @param periodId         Period ObjectId, or the period code ({@code 1w}, {@code 1m}, {@code 3m})
      * @param quantity         The quantity of the order
      * @param authorization    IP whitelist (if need)
      * @param coupon           The coupon code
-     * @param customTargetName The custom target name
+     * @param customTargetName The custom target name — mandatory for ipv4/ipv6/isp, and for a
+     *                         mix order that does not resolve to a package; the SDK rejects the
+     *                         call locally instead of letting the server answer
+     *                         {@code Incorrect goal} (code 14)
      * @return An array containing the order details
      * @throws Exception Error
      */
@@ -912,12 +987,15 @@ public class Api {
      * Create an order MIX.
      * Attention! Calling this method will deduct $ from your balance!
      *
-     * @param mixId            The MIX package ID
-     * @param periodId         The ID of the period
+     * @param mixId            MIX package ObjectId, or the package tag
+     * @param periodId         Period ObjectId, or the period code ({@code 1w}, {@code 1m}, {@code 3m})
      * @param quantity         The quantity of the order
      * @param authorization    IP whitelist (if need)
      * @param coupon           The coupon code
-     * @param customTargetName The custom target name
+     * @param customTargetName The custom target name — mandatory for ipv4/ipv6/isp, and for a
+     *                         mix order that does not resolve to a package; the SDK rejects the
+     *                         call locally instead of letting the server answer
+     *                         {@code Incorrect goal} (code 14)
      * @return An array containing the order details
      * @throws Exception Error
      */
@@ -931,7 +1009,18 @@ public class Api {
         return orderMakeMix(mixId, periodId, quantity, authorization, coupon, customTargetName);
     }
 
-    /** Create a MIX order using stable reference codes. */
+    /**
+     * Create a MIX order using stable reference codes.
+     * Attention! Calling this method will deduct $ from your balance!
+     *
+     * @param mixCode    MIX package tag (exact match). {@code reference/list} exposes it as
+     *                   {@code country[].tag} of the {@code mix}/{@code mix_isp} section
+     * @param periodCode Period code ({@code 1w}, {@code 1m}, {@code 3m}) — not returned by
+     *                   {@code reference/list}, which only has {@code period[].id}/{@code name}
+     * @param quantity   The quantity of the order
+     * @return An array containing the order details
+     * @throws Exception Error
+     */
     public Map orderMakeMixByCode(String mixCode, String periodCode, Long quantity) throws Exception {
         OrderOptions options = new OrderOptions();
         options.sectionCode = "mix";
@@ -945,12 +1034,15 @@ public class Api {
      * Create an order IPv6.
      * Attention! Calling this method will deduct $ from your balance!
      *
-     * @param countryId        The ID of the country (ObjectId or country code)
-     * @param periodId         The ID of the period
+     * @param countryId        Country ObjectId, or the alpha-3 country code ({@code USA})
+     * @param periodId         Period ObjectId, or the period code ({@code 1w}, {@code 1m}, {@code 3m})
      * @param quantity         The quantity of the order
      * @param authorization    IP whitelist (if need)
      * @param coupon           The coupon code
-     * @param customTargetName The custom target name
+     * @param customTargetName The custom target name — mandatory for ipv4/ipv6/isp, and for a
+     *                         mix order that does not resolve to a package; the SDK rejects the
+     *                         call locally instead of letting the server answer
+     *                         {@code Incorrect goal} (code 14)
      * @param protocol         HTTPS or SOCKS5
      * @return An array containing the order details
      * @throws Exception Error
@@ -963,13 +1055,17 @@ public class Api {
      * Create an order Mobile.
      * Attention! Calling this method will deduct $ from your balance!
      *
-     * @param countryId     The ID of the country (ObjectId or country code)
-     * @param periodId      The ID of the period
+     * @param countryId     Country ObjectId, or the alpha-3 country code ({@code USA})
+     * @param periodId      Period ObjectId, or the period code ({@code 1w}, {@code 1m}, {@code 3m})
      * @param quantity      The quantity of the order
      * @param authorization IP whitelist (if need)
      * @param coupon        The coupon code
-     * @param operatorId    The mobile operator id
-     * @param rotationId    The rotation id
+     * @param operatorId    Mobile operator ObjectId, or the operator tag
+     * @param rotationId    Rotation interval in <b>minutes</b> as a decimal string
+     *                      ({@code "5"}, {@code "10"}, {@code "0"} = By Link). This field
+     *                      has no code form: {@code "5m"} or an ObjectId is rejected.
+     *                      The value comes from {@code reference/list} as
+     *                      {@code country[].operators.*[].rotations[].id}
      * @return An array containing the order details
      * @throws Exception Error
      */
@@ -980,6 +1076,23 @@ public class Api {
     /**
      * Create a mobile order and explicitly select {@code shared} or
      * {@code dedicated} service.
+     * Attention! Calling this method will deduct $ from your balance!
+     *
+     * <p>Codes go into the positional arguments; {@code rotationId} is minutes, not a code:
+     * <pre>{@code
+     * api.orderMakeMobile("USA", "1m", 1L, null, null, operatorId, "0", "shared");
+     * }</pre>
+     *
+     * @param countryId         Country ObjectId, or the alpha-3 country code ({@code USA})
+     * @param periodId          Period ObjectId, or the period code ({@code 1m})
+     * @param quantity          The quantity of the order
+     * @param authorization     IP whitelist (if need)
+     * @param coupon            The coupon code
+     * @param operatorId        Mobile operator ObjectId, or the operator tag
+     * @param rotationId        Rotation interval in <b>minutes</b> ({@code "0"} = By Link), no code form
+     * @param mobileServiceType {@code shared} or {@code dedicated}
+     * @return An array containing the order details
+     * @throws Exception Error
      */
     public Map orderMakeMobile(String countryId, String periodId, Long quantity, String authorization,
                                String coupon, String operatorId, String rotationId,
@@ -992,7 +1105,7 @@ public class Api {
      * Create an order Resident.
      * Attention! Calling this method will deduct $ from your balance!
      *
-     * @param tarifId The tarif id
+     * @param tarifId Resident tariff ObjectId, or the tariff code (exact match)
      * @param coupon  The coupon code
      * @return An array containing the order details
      * @throws Exception Error
@@ -1244,7 +1357,7 @@ public class Api {
      *
      * @param type     The type of the renewal (ipv4, ipv6, mobile, isp, mix).
      * @param ids      The list of IDs.
-     * @param periodId The period ID.
+     * @param periodId Period ObjectId, or the period code ({@code 1w}, {@code 1m}, {@code 3m}).
      * @param coupon   The coupon code.
      * @return The result of the renewal calculation.
      * @throws Exception Error
@@ -1270,7 +1383,7 @@ public class Api {
      *
      * @param type     The type of the renewal (ipv4, ipv6, mobile, isp, mix).
      * @param ids      The list of IDs.
-     * @param periodId The period ID.
+     * @param periodId Period ObjectId, or the period code ({@code 1w}, {@code 1m}, {@code 3m}).
      * @param coupon   The coupon code.
      * @return The result of the renewal order creation.
      * @throws Exception Error

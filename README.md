@@ -52,20 +52,87 @@ sending every request without a key.
 ## Identifiers are strings
 
 Every id in v2 is a MongoDB **ObjectId string**: `countryId`, `periodId`,
-`paymentId`, `operatorId`, `rotationId`, `tarifId`, `orderId`, auth ids, IP
-address ids. Do not parse them into `int`/`long` — they are not numbers, and the
-numeric ids of v1 do not resolve at all.
+`paymentId`, `operatorId`, `mixId`, `tarifId`, `orderId`, auth ids, IP address
+ids. Do not parse them into `int`/`long` — they are not numbers, and the numeric
+ids of v1 do not resolve at all.
 
-Where possible, prefer the stable codes over ids — they survive migrations and
-are identical in dev and production:
+Two fields are **not** ObjectIds:
+
+* `rotationId` — the mobile rotation interval in **minutes** (`0` = By Link).
+  See [Mobile rotation](#mobile-rotation-is-a-number-of-minutes).
+* resident list ids — they stayed numeric. See
+  [The one exception: resident list ids](#the-one-exception-resident-list-ids).
+
+### An id argument also takes a code
+
+Every reference `*Id` field of `order/*` and `prolong/*` has a code fallback: if
+the value is not a valid id **and** the matching `*Code` field is empty, the
+server resolves it as a code. That covers `countryId`, `periodId`, `paymentId`,
+`operatorId`, `mixId` and `tarifId`.
+
+So a code goes straight into the positional argument — no `OrderOptions` and no
+chain of nulls is needed just to pass one:
 
 ```java
-// works, and keeps working
-api.orderCalcIpv4("USA", "1m", 5L, null, null, null);
+// countryId="USA" and periodId="1m" are resolved as codes
+api.orderCalcIpv4("USA", "1m", 5L, null, null, "Research");
+
+api.orderCalcMobile(
+        "USA",          // countryId: ObjectId or alpha-3 country code
+        "1m",           // periodId: ObjectId or period code
+        1L,             // quantity
+        null,           // authorization — optional IP whitelist
+        null,           // coupon — optional
+        "OPERATOR_ID",  // operatorId: ObjectId from the reference, or the operator tag
+        "5",            // rotationId: MINUTES, "0" = By Link. Never a code — "5m" is rejected
+        "dedicated");   // shared or dedicated
 ```
 
-Available codes come from `referenceList()`: `countryCode` (`USA`, `FRA`, `BRA`),
-`periodCode` (`1w`, `1m`, `3m`), `tarifCode`, `mixCode`, `operatorCode`, `rotationCode`.
+The two `null`s there are the genuinely optional `authorization` and `coupon`,
+not placeholders for something that had to move into an options object.
+
+Matching is not fully case-insensitive: a country code is upper-cased (`usa`
+works), a period code is lower-cased (`1M` works), while an operator tag, a mix
+tag, a tariff code and a payment code must match exactly.
+
+### Mobile rotation is a number of minutes
+
+`rotationId` is the one reference field with no code form. It is the rotation
+interval in **minutes**, sent as a decimal string: `"5"`, `"10"`, `"0"` (`0` is
+By Link). Anything else — `"5m"`, `"ROTATION_ID"`, an ObjectId — is not a value
+the server can use.
+
+`rotationCode` exists in the payload but is never resolved: the server only
+copies it into `rotationId` and rejects it when it is not an integer. Set
+`rotationId` and ignore `rotationCode`.
+
+### What you can pass, and where to get it
+
+`referenceList()` is far less code-friendly than it looks — only the country has
+a code field. Everything else gives you an id (or, for rotation, the value
+itself):
+
+| field | accepts | in `referenceList()` |
+|---|---|---|
+| `countryId` | ObjectId **or** alpha-3 country code (`USA`) | both — `country[].id` and `country[].alpha3` |
+| `periodId` | ObjectId **or** period code (`1w`, `1m`, `3m`) | id only — `period[]` has `id` and `name`, no code |
+| `operatorId` | ObjectId **or** operator tag | id only — `country[].operators.dedicated[]`/`.shared[]` have `id` and `name`, no tag field* |
+| `rotationId` | minutes as a string (`0` = By Link), never a code | the value — `operators.*[].rotations[].id` **is** the minutes, `name` is `"5 minutes"` / `"By Link"` |
+| `mixId` | ObjectId **or** mix package tag | id — `quantities[].id`; on `mix`/`mix_isp` the `country[]` entries also carry `tag`, when the package has one |
+| `tarifId` | ObjectId **or** resident tariff code | id only — `resident.tarifs[]` have `id`, `name`, `personal`, no code |
+| `paymentId` | ObjectId **or** payment code (`balance`) on `order/*` and `prolong/*`; **ObjectId only** on `balance/add` | id only — `balancePaymentsList()` returns `id` and `name` |
+
+\* in one branch of the reference the operator `id` is already the tag rather
+than an ObjectId. Both forms resolve, so pass it through as it came.
+
+Codes are still worth using when you already know them — `USA`, `1m`, `balance`
+are stable across dev and production, ObjectIds are not. Just do not expect the
+reference to hand you a code for a period, an operator, a mix, a tariff or a
+payment system: take the `id` from there instead.
+
+The fallback lives in `order/calc`, `order/make`, `prolong/calc` and
+`prolong/make` only. Every other endpoint — `proxy/*`, `auth/*`, `balance/add`,
+`resident/*` — takes ids.
 
 ### The one exception: resident list ids
 
@@ -93,40 +160,62 @@ signatures still work unchanged.
 
 ## Client API v2 options
 
-Use `OrderOptions` for explicit code-first requests. Code values override the
-corresponding environment-specific ids:
+The typed methods take everything an order needs positionally, ids and codes
+alike. Every `null` below is an optional value: `authorization` (IP whitelist),
+`coupon`, and `customTargetName` where the section does not require it:
+
+```java
+// mobile: operator id (or tag) positionally, rotation in minutes, "0" = By Link
+api.orderCalcMobile("USA", "1m", 1L, null, null, "OPERATOR_ID", "5", "dedicated");
+api.orderMakeMobile("USA", "1m", 1L, null, null, "OPERATOR_ID", "0", "shared");
+
+// mix, by package id or by package tag
+api.orderCalcMixById("MIX_OBJECT_ID", "1m", 100L, null, null, null);
+api.orderCalcMixByCode("MIX_PACKAGE_TAG", "1m", 100L);
+
+// ipv4/isp with explicit Uptime; customTargetName is mandatory here
+api.orderCalcIpv4("USA", "1m", 5L, null, null, "Research", true);
+
+// resident: the same argument takes the tariff id or its code
+api.orderCalcResident("TARIF_ID", null);
+```
+
+`OrderOptions` is for the fields that have no positional argument — a per-request
+payment system, `generateAuth` for a single `order/make`, `protocol`, `uptime`,
+or a mix selected through `countryId`:
 
 ```java
 OrderOptions order = new OrderOptions();
 order.sectionCode = "mobile";
-order.countryCode = "USA";
-order.periodCode = "1m";
-order.paymentCode = "balance";
-order.operatorCode = "vodafone";
-order.rotationCode = "10";
+order.countryId = "USA";           // id or code, same field
+order.periodId = "1m";
+order.operatorId = "OPERATOR_ID";  // id or operator tag
+order.rotationId = "5";            // minutes, "0" = By Link
 order.mobileServiceType = "dedicated"; // shared or dedicated
 order.quantity = 5L;
-api.orderCalc(order);
+order.paymentCode = "balance";     // this request only, ignores setPaymentCode
+order.generateAuth = "Y";          // order/make only, ignores setGenerateAuth
+api.orderMake(order);
 ```
 
-MIX has explicit id/code helpers, and IPv4/ISP have Uptime overloads:
+The `*Code` fields are still there for when you want to be explicit: setting one
+drops the corresponding `*Id` from the payload. `rotationCode` is the exception —
+the server does not resolve it, so use `rotationId` (see
+[Mobile rotation](#mobile-rotation-is-a-number-of-minutes)).
+
+Renewals work the same way — the period code goes into `periodId`:
 
 ```java
-api.orderCalcMixById("MIX_OBJECT_ID", "PERIOD_OBJECT_ID", 100L, null, null, null);
-api.orderCalcMixByCode("mix-us-eu", "1m", 100L);
-api.orderCalcIpv4("COUNTRY_ID", "PERIOD_ID", 5L, null, null, "Research", true);
-api.orderMakeMobile("COUNTRY_ID", "PERIOD_ID", 1L, null, null,
-        "OPERATOR_ID", "ROTATION_ID", "shared");
+api.prolongCalc("ipv4", java.util.List.of("IP_ADDRESS_ID"), "1m", null);
 ```
 
-`ProlongOptions` exposes the complete renewal payload: `ids`,
-`orderSeparatorIds`, `orderSeparatorId`, `coupon`, `periodId`, `periodCode`,
-`paymentId` and `paymentCode`.
+`ProlongOptions` adds what the positional call has no room for:
+`orderSeparatorIds`, `orderSeparatorId` and a per-request payment system.
 
 ```java
 ProlongOptions prolong = new ProlongOptions();
 prolong.orderSeparatorIds = java.util.List.of("SEPARATOR_ID");
-prolong.periodCode = "1m";
+prolong.periodId = "1m";
 prolong.paymentCode = "balance";
 api.prolongCalc("mix", prolong);
 ```
