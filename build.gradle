@@ -5,11 +5,19 @@ plugins {
 }
 
 group = 'com.proxy-seller'
-version = '1.2'
+version = '2.0'
 
 java {
     withJavadocJar()
     withSourcesJar()
+}
+
+// Без явного release байткод собирается под тот JDK, которым собирали (у нас 21), и
+// jar-ы из dist/ молча перестают запускаться на JDK клиента. release (а не source/target)
+// проверяет заодно и API: случайный вызов метода из более нового JDK не соберётся здесь,
+// вместо NoSuchMethodError у клиента.
+tasks.withType(JavaCompile).configureEach {
+    options.release = 17
 }
 jar {
     exclude('/org/proxyseller/Debug.class')
