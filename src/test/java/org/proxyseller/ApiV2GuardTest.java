@@ -178,6 +178,58 @@ class ApiV2GuardTest {
         assertFalse(e.isAccessError());
     }
 
+    /**
+     * Продление по самим адресам: их клиент видит в proxy/list, ObjectId — нет.
+     * Сервер при наличии ids игнорирует ips, так что пустой ids рядом с ips отменил бы запрос.
+     */
+    @Test
+    void addressesAreRoutedIntoIps() {
+        List<List<String>> split = Api.splitProlongTargets(Arrays.asList("1.2.3.4", "5.6.7.8"));
+        assertEquals(Arrays.asList("1.2.3.4", "5.6.7.8"), split.get(0));
+        assertTrue(split.get(1).isEmpty());
+    }
+
+    @Test
+    void objectIdsAreRoutedIntoIds() {
+        List<List<String>> split = Api.splitProlongTargets(List.of("68b1f0c4e13a4c0f1a2b3c4d"));
+        assertTrue(split.get(0).isEmpty());
+        assertEquals(List.of("68b1f0c4e13a4c0f1a2b3c4d"), split.get(1));
+    }
+
+    @Test
+    void mixedListIsRoutedByShape() {
+        List<List<String>> split =
+                Api.splitProlongTargets(Arrays.asList("1.2.3.4", "68b1f0c4e13a4c0f1a2b3c4d"));
+        assertEquals(List.of("1.2.3.4"), split.get(0));
+        assertEquals(List.of("68b1f0c4e13a4c0f1a2b3c4d"), split.get(1));
+    }
+
+    @Test
+    void ipv6AndMobileFormatsAreAddresses() {
+        List<List<String>> split =
+                Api.splitProlongTargets(Arrays.asList("2001:db8::1:8080", "10.0.0.1:8000:9000"));
+        assertEquals(Arrays.asList("2001:db8::1:8080", "10.0.0.1:8000:9000"), split.get(0));
+        assertTrue(split.get(1).isEmpty());
+    }
+
+    @Test
+    void blanksAndNullsAreDropped() {
+        List<List<String>> split =
+                Api.splitProlongTargets(Arrays.asList("1.2.3.4", "   ", "", null));
+        assertEquals(List.of("1.2.3.4"), split.get(0));
+        assertTrue(split.get(1).isEmpty());
+    }
+
+    @Test
+    void prolongOptionsSendIpsWithoutAnEmptyIds() {
+        ProlongOptions options = new ProlongOptions();
+        options.ips = List.of("1.2.3.4");
+        options.periodId = "1m";
+        Map<Object, Object> payload = options.toMap();
+        assertEquals(List.of("1.2.3.4"), payload.get("ips"));
+        assertFalse(payload.containsKey("ids"), "ids must be absent: the server prefers it over ips");
+    }
+
     private static Map<String, Object> errorItem(String message, int code) {
         LinkedHashMap<String, Object> item = new LinkedHashMap<>();
         item.put("message", message);

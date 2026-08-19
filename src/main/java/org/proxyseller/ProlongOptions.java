@@ -14,6 +14,14 @@ import java.util.Map;
 public class ProlongOptions {
     /** IP address ids to renew (ObjectId strings). */
     public Collection<String> ids;
+    /**
+     * The addresses themselves instead of ids — exactly as {@code proxy/list} returns them:
+     * {@code 1.2.3.4} for ipv4/isp/mix, {@code host:port} for ipv6,
+     * {@code ip:portHttp:portSocks} for mobile. The server resolves them into ids
+     * ({@code ClientApiService.resolveProlongIpsToIds}). If both are set, the server uses
+     * {@code ids}.
+     */
+    public Collection<String> ips;
     /** Order separator ids of a MIX order to renew (ObjectId strings). */
     public Collection<String> orderSeparatorIds;
     /** A single MIX order separator id (ObjectId string). */
@@ -31,6 +39,7 @@ public class ProlongOptions {
     public Map<Object, Object> toMap() {
         LinkedHashMap<Object, Object> map = new LinkedHashMap<>();
         put(map, "ids", ids);
+        put(map, "ips", ips);
         put(map, "orderSeparatorIds", orderSeparatorIds);
         put(map, "orderSeparatorId", orderSeparatorId);
         put(map, "coupon", coupon);

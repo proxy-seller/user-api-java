@@ -24,19 +24,34 @@ public class Proxy {
 
     public static void main(String[] args) throws Exception {
         Api api = new Api(new Config("YOUR_API_KEY"));
-//        api.setPaymentId("PAYMENT_SYSTEM_ID");
-//        api.setGenerateAuth("N");
         System.out.println(api.balance());
     }
 }
 ```
 
-The api key is a **path segment** in v2
+Nothing else is required — the client talks to `https://proxy-seller.com/personal/api/v2/` by
+default. The api key is a **path segment** in v2
 (`https://proxy-seller.com/personal/api/v2/{apiKey}/...`), not a header.
 
-For a local or development Client API, pass the v2 API root. The key is
-appended and URL-encoded automatically; a complete per-key URL or a URL with
-`{apiKey}` is also accepted:
+### Paying for orders
+
+Every order and renewal needs a payment system. Take one from `balancePaymentsList()` and set it
+once:
+
+```java
+List<Map> payments = (List<Map>) api.balancePaymentsList();   // [{id=69e7…, name=PayPal}, …]
+api.setPaymentId((String) payments.get(0).get("id"));
+```
+
+This is the one place where an id is unavoidable: several payment systems share the same internal
+code (a single `cryptomus` covers "USDT (TRC-20)", "All cryptocurrencies" and more), so the code
+cannot tell them apart. Everywhere else you use human-readable codes.
+
+<details>
+<summary>Pointing the client at another host, and timeouts</summary>
+
+Pass the v2 API root. The key is appended and URL-encoded automatically; a complete per-key URL
+or a URL with `{apiKey}` is also accepted:
 
 ```java
 Config config = new Config("YOUR_API_KEY", "http://localhost:7995/personal/api/v2/");
@@ -48,6 +63,8 @@ Api api = new Api(config);
 A custom `baseUri` that is neither the v2 root nor contains the key is rejected
 with an `IllegalArgumentException` at construction time, instead of silently
 sending every request without a key.
+
+</details>
 
 ## Identifiers are strings
 
@@ -108,31 +125,26 @@ copies it into `rotationId` and rejects it when it is not an integer. Set
 
 ### What you can pass, and where to get it
 
-`referenceList()` is far less code-friendly than it looks — only the country has
-a code field. Everything else gives you an id (or, for rotation, the value
-itself):
+`referenceList()` gives you a readable code for every field. Read it, pass the
+code straight into the request field — there is no id to look up:
 
-| field | accepts | in `referenceList()` |
+| field | pass this | read it from |
 |---|---|---|
-| `countryId` | ObjectId **or** alpha-3 country code (`USA`) | both — `country[].id` and `country[].alpha3` |
-| `periodId` | ObjectId **or** period code (`1w`, `1m`, `3m`) | id only — `period[]` has `id` and `name`, no code |
-| `operatorId` | ObjectId **or** operator tag | id only — `country[].operators.dedicated[]`/`.shared[]` have `id` and `name`, no tag field* |
-| `rotationId` | minutes as a string (`0` = By Link), never a code | the value — `operators.*[].rotations[].id` **is** the minutes, `name` is `"5 minutes"` / `"By Link"` |
-| `mixId` | ObjectId **or** mix package tag | id — `quantities[].id`; on `mix`/`mix_isp` the `country[]` entries also carry `tag`, when the package has one |
-| `tarifId` | ObjectId **or** resident tariff code | id only — `resident.tarifs[]` have `id`, `name`, `personal`, no code |
-| `paymentId` | ObjectId **or** payment code (`balance`) on `order/*` and `prolong/*`; **ObjectId only** on `balance/add` | id only — `balancePaymentsList()` returns `id` and `name` |
+| `countryId` | alpha-3 country code, e.g. `USA` (upper-cased server-side, so `usa` works) | `country[].alpha3` |
+| `periodId` | period code, e.g. `1m` (lower-cased server-side) | `period[].code` |
+| `operatorId` | mobile operator tag — exact match, case-sensitive | `country[].operators.dedicated[]`/`.shared[]` → `tag` |
+| `rotationId` | minutes as a string (`0` = By Link). The one field with no code | `operators.*[].rotations[].id` **is** the minutes, `name` is `"5 minutes"` / `"By Link"` |
+| `mixId` | mix package code — exact match, or its ObjectId | `reference/list/mix` → `quantities[].tag`, e.g. `europe-2-mix_IPv4`. First argument of `orderCalcMix`/`orderMakeMix` |
+| `tarifId` | resident tariff code — exact match, e.g. `1-gb` | `resident.tarifs[]` → `code` |
+| `paymentId` | payment-system ObjectId — the one unavoidable id | `balancePaymentsList()` → `id`, see [Paying for orders](#paying-for-orders) |
 
-\* in one branch of the reference the operator `id` is already the tag rather
-than an ObjectId. Both forms resolve, so pass it through as it came.
+ObjectIds are still accepted everywhere if you happen to have them; the
+reference simply no longer publishes them.
 
-Codes are still worth using when you already know them — `USA`, `1m`, `balance`
-are stable across dev and production, ObjectIds are not. Just do not expect the
-reference to hand you a code for a period, an operator, a mix, a tariff or a
-payment system: take the `id` from there instead.
-
-The fallback lives in `order/calc`, `order/make`, `prolong/calc` and
-`prolong/make` only. Every other endpoint — `proxy/*`, `auth/*`, `balance/add`,
-`resident/*` — takes ids.
+Code resolution lives in `order/calc`, `order/make`, `prolong/calc` and
+`prolong/make`. Every other endpoint — `proxy/*`, `auth/*`, `balance/add`,
+`resident/*` — works with ids; the exception is renewal, which takes the proxy
+addresses (see [Renewing proxies](#renewing-proxies)).
 
 ### The one exception: resident list ids
 
@@ -203,22 +215,54 @@ drops the corresponding `*Id` from the payload. `rotationCode` is the exception 
 the server does not resolve it, so use `rotationId` (see
 [Mobile rotation](#mobile-rotation-is-a-number-of-minutes)).
 
-Renewals work the same way — the period code goes into `periodId`:
+## Renewing proxies
+
+Renew by the addresses themselves — the same strings `proxyList()` gives you. No ids to look up:
 
 ```java
-api.prolongCalc("ipv4", java.util.List.of("IP_ADDRESS_ID"), "1m", null);
+Map list = (Map) api.proxyList("ipv4");
+List<Map> items = (List<Map>) list.get("items");
+
+List<String> ips = new ArrayList<>();
+for (Map item : items) {
+    ips.add((String) item.get("ip"));       // ["1.2.3.4", "5.6.7.8"]
+}
+
+api.prolongCalc("ipv4", ips, "1m", null);   // price first
+api.prolongMake("ipv4", ips, "1m", null);   // deducts money
 ```
 
-`ProlongOptions` adds what the positional call has no room for:
-`orderSeparatorIds`, `orderSeparatorId` and a per-request payment system.
+`prolongCalc` shows the price; `prolongMake` charges the balance. If the balance is short,
+`prolongMake` throws an `ApiException` with the server's warning — it never reports a renewal that
+did not happen.
+
+The address format follows the proxy type, exactly as `proxyList()` returns it:
+
+| type | address |
+|---|---|
+| `ipv4`, `isp`, `mix` | `1.2.3.4` |
+| `ipv6` | `host:port` |
+| `mobile` | `ip:portHttp:portSocks` |
+
+ObjectId strings work too, and a mixed list works — each value is routed by its shape. The period
+takes a code (`"1m"`), same fallback as `order/*`, and the fourth argument is a coupon.
+
+<details>
+<summary>Renewing part of a MIX order</summary>
+
+A MIX order can be split into parts that renew independently. Those parts are addressed by id, and
+`ProlongOptions` is how you pass them:
 
 ```java
 ProlongOptions prolong = new ProlongOptions();
 prolong.orderSeparatorIds = java.util.List.of("SEPARATOR_ID");
 prolong.periodId = "1m";
-prolong.paymentCode = "balance";
 api.prolongCalc("mix", prolong);
 ```
+
+`ProlongOptions` also carries `ips`, `ids` and a per-request payment system.
+
+</details>
 
 ## Balance
 
@@ -473,7 +517,7 @@ breaks the most code.
 * `residentListRename`, `residentListRotation` and `residentListDelete` take a `Long` id — resident list ids stayed numeric. `Object` overloads accept the `Double` that Gson hands back.
 * `residentListDelete` sends the id in the request body instead of the query string.
 * `setGenerateAuth()` only affects `order/make`. The `order/calc` endpoint ignores the field.
-* Prefer `setPaymentCode("balance")` to a MongoDB payment id when the same code runs in dev and production — except on `balanceAdd`, which resolves `paymentId` only.
+* Payment systems are chosen by `setPaymentId(...)` — several of them share one internal code, so a code cannot tell them apart. `setPaymentCode(...)` still works for `order/*` and `prolong/*`, but not for `balanceAdd`, which resolves `paymentId` only.
 * `proxyReplace`'s `type` is the replacement reason, not the proxy type.
 * `proxyList()` and `referenceList()` without arguments now hit `proxy/list` and `reference/list`.
 

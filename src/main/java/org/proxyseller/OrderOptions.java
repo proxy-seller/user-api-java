@@ -45,7 +45,7 @@ public class OrderOptions {
     public String mobileServiceType;
     /** Mobile operator ObjectId, or the operator tag (exact match). */
     public String operatorId;
-    /** Mobile operator tag. Not returned by {@code reference/list} as a separate field. */
+    /** Mobile operator tag (case-sensitive), from {@code reference/list/mobile} → {@code country[].operators.{dedicated,shared}[].tag}. */
     public String operatorCode;
     /**
      * Rotation interval in <b>minutes</b> as a decimal string: {@code "5"}, {@code "10"},

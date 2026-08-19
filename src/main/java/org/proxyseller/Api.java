@@ -738,7 +738,8 @@ public class Api {
      * {@code rotations[{id, name}]} where {@code id} is the rotation in <b>minutes</b>
      * ({@code 0} = {@code "By Link"}), mix {@code quantities[]} with {@code id}, {@code name} and
      * {@code quantities}, and resident {@code tarifs[]} with {@code id}, {@code name},
-     * {@code personal}. There is no {@code periodCode}, {@code operatorCode}, {@code tarifCode} or
+     * {@code personal}. Mobile operators additionally carry {@code tag} — that is the
+     * {@code operatorCode}. There is still no {@code periodCode}, {@code tarifCode} or
      * {@code paymentCode} field anywhere in the response — for those, use the id.
      *
      * @return The necessary guides for creating an order.
@@ -1337,6 +1338,58 @@ public class Api {
         return map;
     }
 
+    /**
+     * Splits what the caller passed into addresses and ObjectIds.
+     *
+     * <p>Renewing by the addresses themselves is what a client actually has on hand — those are
+     * the strings {@code proxy/list} returns. The server accepts them in {@code ips} and resolves
+     * them into {@code ids} itself ({@code ClientApiService.resolveProlongIpsToIds}, called
+     * unconditionally for both calc and make). An address always contains a dot or a colon
+     * (ipv4 {@code ip}, ipv6 {@code host:port}, mobile {@code ip:portHttp:portSocks}) while an
+     * ObjectId is 24 hex characters with neither, so a mixed list works too.
+     *
+     * @param ipsOrIds addresses, ObjectId strings, or a mix of both
+     * @return index 0 — addresses, index 1 — ObjectIds; either may be empty
+     */
+    protected static List<List<String>> splitProlongTargets(Collection<?> ipsOrIds) {
+        List<String> ips = new ArrayList<>();
+        List<String> ids = new ArrayList<>();
+        if (ipsOrIds != null) {
+            for (Object item : ipsOrIds) {
+                if (item == null) {
+                    continue;
+                }
+                String value = String.valueOf(item).trim();
+                if (value.isEmpty()) {
+                    continue;
+                }
+                if (value.indexOf('.') >= 0 || value.indexOf(':') >= 0) {
+                    ips.add(value);
+                } else {
+                    ids.add(value);
+                }
+            }
+        }
+        List<List<String>> split = new ArrayList<>();
+        split.add(ips);
+        split.add(ids);
+        return split;
+    }
+
+    /** Routes a caller-supplied list into {@code ips}/{@code ids} on the options object. */
+    private static void routeProlongTargets(ProlongOptions prolongOptions, List ipsOrIds) {
+        List<List<String>> split = splitProlongTargets(ipsOrIds);
+        List<String> ips = split.get(0);
+        List<String> ids = split.get(1);
+        // An empty ids next to ips would silently win: the server prefers ids when both are set.
+        if (!ids.isEmpty()) {
+            prolongOptions.ids = ids;
+        }
+        if (!ips.isEmpty()) {
+            prolongOptions.ips = ips;
+        }
+    }
+
     private Map prepareProlong(ProlongOptions prolongOptions) {
         if (prolongOptions == null) {
             throw new IllegalArgumentException("prolongOptions is required");
@@ -1355,16 +1408,19 @@ public class Api {
     /**
      * Calculate the renewal.
      *
-     * @param type     The type of the renewal (ipv4, ipv6, mobile, isp, mix).
-     * @param ids      The list of IDs.
-     * @param periodId Period ObjectId, or the period code ({@code 1w}, {@code 1m}, {@code 3m}).
-     * @param coupon   The coupon code.
+     * @param type      The type of the renewal (ipv4, ipv6, mobile, isp, mix).
+     * @param ipsOrIds  The addresses themselves, exactly as {@code proxy/list} returns them:
+     *                  {@code 1.2.3.4} for ipv4/isp/mix, {@code host:port} for ipv6,
+     *                  {@code ip:portHttp:portSocks} for mobile. ObjectId strings are accepted
+     *                  too, and a mixed list works — each value is routed by its shape.
+     * @param periodId  Period ObjectId, or the period code ({@code 1w}, {@code 1m}, {@code 3m}).
+     * @param coupon    The coupon code.
      * @return The result of the renewal calculation.
      * @throws Exception Error
      */
-    public Map prolongCalc(String type, List ids, String periodId, String coupon) throws Exception {
+    public Map prolongCalc(String type, List ipsOrIds, String periodId, String coupon) throws Exception {
         ProlongOptions prolongOptions = new ProlongOptions();
-        prolongOptions.ids = ids;
+        routeProlongTargets(prolongOptions, ipsOrIds);
         prolongOptions.periodId = periodId;
         prolongOptions.coupon = coupon;
         return prolongCalc(type, prolongOptions);
@@ -1381,16 +1437,18 @@ public class Api {
      * Create a renewal order.
      * Attention! Calling this method will deduct $ from your balance!
      *
-     * @param type     The type of the renewal (ipv4, ipv6, mobile, isp, mix).
-     * @param ids      The list of IDs.
-     * @param periodId Period ObjectId, or the period code ({@code 1w}, {@code 1m}, {@code 3m}).
-     * @param coupon   The coupon code.
+     * @param type      The type of the renewal (ipv4, ipv6, mobile, isp, mix).
+     * @param ipsOrIds  The addresses themselves, exactly as {@code proxy/list} returns them — see
+     *                  {@link #prolongCalc(String, List, String, String)}. ObjectId strings and
+     *                  mixed lists work too.
+     * @param periodId  Period ObjectId, or the period code ({@code 1w}, {@code 1m}, {@code 3m}).
+     * @param coupon    The coupon code.
      * @return The result of the renewal order creation.
      * @throws Exception Error
      */
-    public Map prolongMake(String type, List ids, String periodId, String coupon) throws Exception {
+    public Map prolongMake(String type, List ipsOrIds, String periodId, String coupon) throws Exception {
         ProlongOptions prolongOptions = new ProlongOptions();
-        prolongOptions.ids = ids;
+        routeProlongTargets(prolongOptions, ipsOrIds);
         prolongOptions.periodId = periodId;
         prolongOptions.coupon = coupon;
         return prolongMake(type, prolongOptions);
