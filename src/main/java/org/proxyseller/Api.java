@@ -43,7 +43,7 @@ import java.util.stream.Collectors;
  * {@code periodId} (lower-cased), {@code paymentId}, {@code operatorId} (tag), {@code mixId} (tag)
  * and {@code tarifId} — so a code can be passed straight into the positional argument.
  * {@code rotationId} is the exception and has no code form. {@code reference/list} only returns a
- * code for the country ({@code alpha3}); for a period, an operator, a mix, a tariff and a payment
+ * code for every field, published as {@code id}; the exception is a payment
  * system it returns the id alone.
  *
  * <p><b>Android is not supported.</b> Four endpoints ({@code auth/delete},
@@ -732,15 +732,20 @@ public class Api {
     /**
      * Get necessary guides for creating an order (all types).
      *
-     * <p>What it really returns, per section: {@code country[]} with {@code id}, {@code name} and
-     * {@code alpha3} (the only code in the whole response), {@code period[]} with {@code id} and
-     * {@code name}, mobile operators with {@code id}, {@code name} and
-     * {@code rotations[{id, name}]} where {@code id} is the rotation in <b>minutes</b>
-     * ({@code 0} = {@code "By Link"}), mix {@code quantities[]} with {@code id}, {@code name} and
-     * {@code quantities}, and resident {@code tarifs[]} with {@code id}, {@code name},
-     * {@code personal}. Mobile operators additionally carry {@code tag} — that is the
-     * {@code operatorCode}. There is still no {@code periodCode}, {@code tarifCode} or
-     * {@code paymentCode} field anywhere in the response — for those, use the id.
+     * <p>Every field is called {@code id}, and its value is a readable code rather than an
+     * ObjectId; put it straight into the matching {@code *Id} request field. Per section:
+     * {@code country[]} with {@code id} (the alpha-3 code, {@code "USA"}) and {@code name};
+     * {@code period[]} with {@code id} (the period code, {@code "1m"}) and {@code name};
+     * mobile operators with {@code id} (the operator tag, case-sensitive), {@code name} and
+     * {@code rotations[{id, name}]} where that {@code id} is the rotation in <b>minutes</b>
+     * ({@code 0} = {@code "By Link"}) — the one {@code id} that is a number, not a code;
+     * mix {@code quantities[]} with {@code id} (the package code), {@code name} and the allowed
+     * {@code quantities}; resident {@code tarifs[]} with {@code id} (the tariff code),
+     * {@code name} and {@code personal}.
+     *
+     * <p>The one exception is {@code balance/payments/list}, where {@code id} stays a real
+     * ObjectId: several payment systems share a single gateway code, so the code cannot tell
+     * them apart.
      *
      * @return The necessary guides for creating an order.
      * @throws Exception Error
@@ -832,7 +837,7 @@ public class Api {
      * Calculate a MIX order using stable reference codes.
      *
      * @param mixCode    MIX package tag (exact match). {@code reference/list} exposes it as
-     *                   {@code country[].tag} of the {@code mix}/{@code mix_isp} section
+     *                   {@code quantities[].id} of the {@code mix}/{@code mix_isp} section
      * @param periodCode Period code ({@code 1w}, {@code 1m}, {@code 3m}) — not returned by
      *                   {@code reference/list}, which only has {@code period[].id}/{@code name}
      * @param quantity   The quantity of the order
@@ -1015,7 +1020,7 @@ public class Api {
      * Attention! Calling this method will deduct $ from your balance!
      *
      * @param mixCode    MIX package tag (exact match). {@code reference/list} exposes it as
-     *                   {@code country[].tag} of the {@code mix}/{@code mix_isp} section
+     *                   {@code quantities[].id} of the {@code mix}/{@code mix_isp} section
      * @param periodCode Period code ({@code 1w}, {@code 1m}, {@code 3m}) — not returned by
      *                   {@code reference/list}, which only has {@code period[].id}/{@code name}
      * @param quantity   The quantity of the order

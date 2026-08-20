@@ -125,17 +125,18 @@ copies it into `rotationId` and rejects it when it is not an integer. Set
 
 ### What you can pass, and where to get it
 
-`referenceList()` gives you a readable code for every field. Read it, pass the
-code straight into the request field — there is no id to look up:
+Every field in `referenceList()` is called `id`, and its value is a readable
+code — not an ObjectId. Read `id`, put it in the matching `*Id` request field.
+That is the whole rule:
 
 | field | pass this | read it from |
 |---|---|---|
-| `countryId` | alpha-3 country code, e.g. `USA` (upper-cased server-side, so `usa` works) | `country[].alpha3` |
-| `periodId` | period code, e.g. `1m` (lower-cased server-side) | `period[].code` |
-| `operatorId` | mobile operator tag — exact match, case-sensitive | `country[].operators.dedicated[]`/`.shared[]` → `tag` |
-| `rotationId` | minutes as a string (`0` = By Link). The one field with no code | `operators.*[].rotations[].id` **is** the minutes, `name` is `"5 minutes"` / `"By Link"` |
-| `mixId` | mix package code — exact match, or its ObjectId | `reference/list/mix` → `quantities[].tag`, e.g. `europe-2-mix_IPv4`. First argument of `orderCalcMix`/`orderMakeMix` |
-| `tarifId` | resident tariff code — exact match, e.g. `1-gb` | `resident.tarifs[]` → `code` |
+| `countryId` | alpha-3 country code, e.g. `USA` (upper-cased server-side, so `usa` works) | `country[].id` |
+| `periodId` | period code, e.g. `1m` (lower-cased server-side) | `period[].id` |
+| `operatorId` | mobile operator code — exact match, case-sensitive | `country[].operators.dedicated[]`/`.shared[]` → `id` |
+| `rotationId` | minutes as a string (`0` = By Link) — the one `id` that is a number, not a code | `operators.*[].rotations[].id` **is** the minutes, `name` is `"5 minutes"` / `"By Link"` |
+| `mixId` | mix package code — exact match, or its ObjectId | `reference/list/mix` → `quantities[].id`, e.g. `europe-2-mix_IPv4`. First argument of `orderCalcMix`/`orderMakeMix` |
+| `tarifId` | resident tariff code — exact match, e.g. `1-gb` | `resident.tarifs[]` → `id` |
 | `paymentId` | payment-system ObjectId — the one unavoidable id | `balancePaymentsList()` → `id`, see [Paying for orders](#paying-for-orders) |
 
 ObjectIds are still accepted everywhere if you happen to have them; the

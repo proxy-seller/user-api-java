@@ -18,7 +18,7 @@ import java.util.Map;
 public class OrderOptions {
     /** Country ObjectId, or the alpha-3 country code ({@code USA}); upper-cased server-side. */
     public String countryId;
-    /** Alpha-3 country code. {@code reference/list} returns it as {@code country[].alpha3}. */
+    /** Alpha-3 country code. {@code reference/list} returns it as {@code country[].id}. */
     public String countryCode;
     /** {@code ipv4}, {@code ipv6}, {@code isp}, {@code mobile}, {@code mix}, {@code resident}. */
     public String sectionCode;
@@ -37,7 +37,7 @@ public class OrderOptions {
     public String customTargetName;
     /** MIX package ObjectId, or the package tag (exact match). */
     public String mixId;
-    /** MIX package tag. Exposed as {@code country[].tag} of the mix section in {@code reference/list}. */
+    /** MIX package code. Exposed as {@code quantities[].id} of the mix section in {@code reference/list}. */
     public String mixCode;
     public Boolean uptime;
     public String protocol;
@@ -45,7 +45,7 @@ public class OrderOptions {
     public String mobileServiceType;
     /** Mobile operator ObjectId, or the operator tag (exact match). */
     public String operatorId;
-    /** Mobile operator tag (case-sensitive), from {@code reference/list/mobile} → {@code country[].operators.{dedicated,shared}[].tag}. */
+    /** Mobile operator code (case-sensitive), from {@code reference/list/mobile} → {@code country[].operators.{dedicated,shared}[].id}. */
     public String operatorCode;
     /**
      * Rotation interval in <b>minutes</b> as a decimal string: {@code "5"}, {@code "10"},
