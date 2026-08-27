@@ -1350,8 +1350,13 @@ public class Api {
      * the strings {@code proxy/list} returns. The server accepts them in {@code ips} and resolves
      * them into {@code ids} itself ({@code ClientApiService.resolveProlongIpsToIds}, called
      * unconditionally for both calc and make). An address always contains a dot or a colon
-     * (ipv4 {@code ip}, ipv6 {@code host:port}, mobile {@code ip:portHttp:portSocks}) while an
-     * ObjectId is 24 hex characters with neither, so a mixed list works too.
+     * (ipv4/isp/mix {@code ip}, ipv6 {@code ip} = {@code host:port}, mobile
+     * {@code ip:port_http:port_socks}) while an ObjectId is 24 hex characters with neither, so a
+     * mixed list works too.
+     *
+     * <p>For ipv6 the {@code ip} field already contains the gateway and its port
+     * ({@code 1.2.3.4:26000}) while {@code ip_only} holds the gateway alone — pass {@code ip}
+     * as-is, the colon routes it into {@code ips} like any other address.
      *
      * @param ipsOrIds addresses, ObjectId strings, or a mix of both
      * @return index 0 — addresses, index 1 — ObjectIds; either may be empty
@@ -1415,9 +1420,11 @@ public class Api {
      *
      * @param type      The type of the renewal (ipv4, ipv6, mobile, isp, mix).
      * @param ipsOrIds  The addresses themselves, exactly as {@code proxy/list} returns them:
-     *                  {@code 1.2.3.4} for ipv4/isp/mix, {@code host:port} for ipv6,
-     *                  {@code ip:portHttp:portSocks} for mobile. ObjectId strings are accepted
-     *                  too, and a mixed list works — each value is routed by its shape.
+     *                  {@code 1.2.3.4} for ipv4/isp/mix, {@code host:port} for ipv6 (its
+     *                  {@code ip} field already carries the gateway and its port, e.g.
+     *                  {@code 1.2.3.4:26000}), {@code ip:port_http:port_socks} for mobile.
+     *                  ObjectId strings are accepted for every type, and a mixed list works —
+     *                  each value is routed by its shape.
      * @param periodId  Period ObjectId, or the period code ({@code 1w}, {@code 1m}, {@code 3m}).
      * @param coupon    The coupon code.
      * @return The result of the renewal calculation.

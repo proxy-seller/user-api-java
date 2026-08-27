@@ -237,16 +237,19 @@ api.prolongMake("ipv4", ips, "1m", null);   // deducts money
 `prolongMake` throws an `ApiException` with the server's warning — it never reports a renewal that
 did not happen.
 
-The address format follows the proxy type, exactly as `proxyList()` returns it:
+What you pass follows the proxy type, and every value comes straight out of `proxyList()`:
 
-| type | address |
+| type | what to pass |
 |---|---|
-| `ipv4`, `isp`, `mix` | `1.2.3.4` |
-| `ipv6` | `host:port` |
-| `mobile` | `ip:portHttp:portSocks` |
+| `ipv4`, `isp`, `mix`, `mix_isp` | the `ip` field — `1.2.3.4` |
+| `ipv6` | the `ip` field — `host:port`, e.g. `1.2.3.4:26000` |
+| `mobile` | `ip` + `:` + `port_http` + `:` + `port_socks` |
 
-ObjectId strings work too, and a mixed list works — each value is routed by its shape. The period
-takes a code (`"1m"`), same fallback as `order/*`, and the fourth argument is a coupon.
+For `ipv6` the `ip` field already carries the gateway and its port (`1.2.3.4:26000`), while
+`ip_only` holds the gateway alone — so pass `ip` as it comes, exactly like every other type.
+
+ObjectId strings work for every type, and a mixed list works — each value is routed by its shape.
+The period takes a code (`"1m"`), same fallback as `order/*`, and the fourth argument is a coupon.
 
 <details>
 <summary>Renewing part of a MIX order</summary>

@@ -17,9 +17,13 @@ public class ProlongOptions {
     /**
      * The addresses themselves instead of ids — exactly as {@code proxy/list} returns them:
      * {@code 1.2.3.4} for ipv4/isp/mix, {@code host:port} for ipv6,
-     * {@code ip:portHttp:portSocks} for mobile. The server resolves them into ids
+     * {@code ip:port_http:port_socks} for mobile. The server resolves them into ids
      * ({@code ClientApiService.resolveProlongIpsToIds}). If both are set, the server uses
      * {@code ids}.
+     *
+     * <p>For ipv6 the {@code ip} field already contains the gateway and its port
+     * ({@code 1.2.3.4:26000}) while {@code ip_only} holds the gateway alone — pass {@code ip}
+     * as-is, same as every other type.
      */
     public Collection<String> ips;
     /** Order separator ids of a MIX order to renew (ObjectId strings). */
