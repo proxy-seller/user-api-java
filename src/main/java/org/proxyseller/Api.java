@@ -62,6 +62,11 @@ public class Api {
     private String paymentId;
     private String paymentCode;
     private String generateAuth = "N";
+    private String fingerprint;
+
+    /** Секции {@code order/make}, которые без {@code X-Fingerprint} не создаются вообще. */
+    private static final Set<String> FINGERPRINT_REQUIRED_SECTIONS =
+            Collections.unmodifiableSet(new LinkedHashSet<>(Arrays.asList("resident", "scraper")));
 
     /**
      * Key placed in <a href="https://proxy-seller.com/personal/api/">https://proxy-seller.com/personal/api/</a>
@@ -75,6 +80,7 @@ public class Api {
         }
         config.setBaseUri(resolveBaseUri(config.getBaseUri(), config.getKey()));
         this.config = config;
+        this.fingerprint = config.getFingerprint();
     }
 
     public String getPaymentId() {
@@ -131,6 +137,31 @@ public class Api {
      */
     public void setGenerateAuth(String yn) {
         this.generateAuth = (Objects.equals(yn, "Y")) ? "Y" : "N";
+    }
+
+    public String getFingerprint() {
+        return fingerprint;
+    }
+
+    /**
+     * Value of the {@code X-Fingerprint} header of {@code order/make}.
+     *
+     * <p>The header is declared <b>required</b> on the whole operation. Sections other than
+     * {@code resident} and {@code scraper} ignore it, so sending it always is safe; those two
+     * are not created at all without it — the order service answers
+     * {@code Header X-Fingerprint is required} and nothing is ordered. The SDK therefore refuses
+     * a residential or scraper {@code order/make} locally while the value is unset, instead of
+     * spending a round trip on a request that is guaranteed to be rejected.
+     *
+     * <p>Any opaque string is accepted — the shape is not validated — but it must be a
+     * <b>stable identifier of the installation</b>. The SDK never generates one: a value
+     * randomized per process would break the anti-fraud and affiliate attribution the header
+     * exists for.
+     *
+     * @param fingerprint stable identifier of the calling installation
+     */
+    public void setFingerprint(String fingerprint) {
+        this.fingerprint = fingerprint;
     }
 
     protected byte[] requestDownload(String method, String uri) throws Exception {
@@ -195,7 +226,28 @@ public class Api {
             connection.setReadTimeout(config.getReadTimeoutMillis());
             connection.setRequestProperty("Accept", "application/json, text/plain, */*");
 
-            if (options != null && options.getJson() != null && !options.getJson().isEmpty()) {
+            // Заголовки вызова ставим ДО Content-Type: тот принадлежит транспорту, и переписать
+            // его снаружи означало бы сломать сериализацию тела.
+            if (options != null && options.getHeaders() != null) {
+                for (Map.Entry<Object, Object> header : options.getHeaders().entrySet()) {
+                    if (header.getKey() != null && header.getValue() != null) {
+                        connection.setRequestProperty(String.valueOf(header.getKey()),
+                                String.valueOf(header.getValue()));
+                    }
+                }
+            }
+
+            // Тело шлём для любого метода кроме GET, ДАЖЕ ЕСЛИ карта пуста.
+            //
+            // Раньше условие требовало непустую карту, и запрос без полей уходил вовсе без тела
+            // и без Content-Type. Для эндпоинтов, где спека объявляет requestBody required, это
+            // ломало вызов: autoProlongDisableResident() строит пустой AutoProlongOptions
+            // (резидентке селектор не нужен — пакет адресуется неявно), сервер получал POST без
+            // тела и отвечал "Incorrect request body". Пустой JSON-объект — это валидное тело,
+            // отсутствие тела — нет. У GET тела быть не должно, а json там всегда пуст по
+            // умолчанию, поэтому его отделяем по методу, а не по наполнению карты.
+            boolean sendsBody = !"GET".equalsIgnoreCase(method);
+            if (sendsBody && options != null && options.getJson() != null) {
                 connection.setRequestProperty("Content-Type", "application/json; charset=UTF-8");
                 connection.setDoOutput(true);
                 byte[] jsonBytes = GSON.toJson(options.getJson()).getBytes(StandardCharsets.UTF_8);
@@ -640,9 +692,12 @@ public class Api {
      * {@code threshold}, {@code amount}, {@code subscriptionId},
      * {@code paymentMethod} (null when no card is linked; otherwise {@code id},
      * {@code status}, {@code paymentMethod}, {@code brand}, {@code last4}, {@code exp}),
-     * {@code dailyCountCap}, {@code monthlyAmountCap}, {@code failCount},
+     * {@code failCount},
      * {@code lastAttemptAt} and {@code lastEvent} (null until the first run; otherwise
      * {@code status}, {@code amount}, {@code at}, {@code reason}).
+     *
+     * <p>{@code dailyCountCap} and {@code monthlyAmountCap} are <b>gone</b> — they were removed
+     * from the contract on 2026-08-18 and are no longer part of the state.
      *
      * <p>When the feature is switched off on the server the call fails with business
      * code 49 ("Auto top-up is not available").
@@ -655,7 +710,7 @@ public class Api {
     }
 
     /**
-     * Enable/disable auto top-up or update its thresholds and caps.
+     * Enable/disable auto top-up or update its threshold and amount.
      *
      * <p>This is a <b>partial update</b>: fields left unset in {@code options} are not
      * sent at all and keep their stored value — see {@link AutoTopupOptions}.
@@ -663,9 +718,9 @@ public class Api {
      * <p>The response is the same payload as {@link #balanceAutoTopupGet()}, already
      * reflecting the save, so no second request is needed. Validation lives entirely on
      * the server and runs against the merged result; rejections arrive as business codes
-     * 49-56 with the allowed boundaries in {@code customData}
-     * ({@code minAmount} / {@code minThreshold} / {@code minDailyCountCap}), reachable
-     * through {@link ApiException#getCustomData()} and {@link ApiException#getErrors()}.
+     * 49-53 and 56 with the allowed boundaries in {@code customData}
+     * ({@code minAmount} / {@code minThreshold}), reachable through
+     * {@link ApiException#getCustomData()} and {@link ApiException#getErrors()}.
      *
      * @param options fields to change
      * @return the auto top-up state after saving
@@ -679,14 +734,15 @@ public class Api {
     }
 
     /**
-     * Enable/disable auto top-up or update its thresholds and caps with a free format map.
+     * Enable/disable auto top-up or update its threshold and amount with a free format map.
      *
      * <p>Accepted keys: {@code enabled}, {@code threshold}, {@code amount},
-     * {@code subscriptionId}, {@code dailyCountCap}, {@code monthlyAmountCap}. Null
-     * values are dropped so that an omitted field never resets a stored one.
+     * {@code subscriptionId}. Null values are dropped so that an omitted field never resets a
+     * stored one.
      *
      * @param settings fields to change
      * @return the auto top-up state after saving
+     * @throws IllegalArgumentException on a field removed from the contract, or on an empty payload
      * @throws Exception Error
      */
     public Map balanceAutoTopupSet(Map settings) throws Exception {
@@ -694,19 +750,40 @@ public class Api {
         LinkedHashMap<Object, Object> map = new LinkedHashMap<>();
         if (settings != null) {
             for (Object key : settings.keySet()) {
+                assertAutoTopupField(String.valueOf(key));
                 putIfNotNull(map, String.valueOf(key), settings.get(key));
             }
         }
         if (map.isEmpty()) {
             throw new IllegalArgumentException("balance/autotopup/set needs at least one field to change"
-                    + " (enabled, threshold, amount, subscriptionId, dailyCountCap, monthlyAmountCap)");
+                    + " (enabled, threshold, amount, subscriptionId)");
         }
         options.setJson(map);
         return (Map) (request("post", "balance/autotopup/set", options));
     }
 
+    /** Поля, удалённые из balance/autotopup/set 18.08.2026 (AutoTopupSetRequestClientDto). */
+    private static final Set<String> REMOVED_AUTO_TOPUP_FIELDS =
+            Collections.unmodifiableSet(new LinkedHashSet<>(Arrays.asList("dailyCountCap", "monthlyAmountCap")));
+
     /**
-     * Switch auto top-up on or off without touching the thresholds and caps.
+     * Присланные dailyCountCap / monthlyAmountCap сервер молча ИГНОРИРУЕТ: вызов проходит,
+     * отвечает success и не делает ничего. Тихий no-op хуже отказа — клиент считает, что лимит
+     * установлен. Отбиваем такие ключи здесь, объясняя, что их больше нет в контракте.
+     *
+     * @param key ключ из свободной карты настроек
+     */
+    private static void assertAutoTopupField(String key) {
+        if (REMOVED_AUTO_TOPUP_FIELDS.contains(key)) {
+            throw new IllegalArgumentException(key + " was removed from balance/autotopup/set"
+                    + " on 2026-08-18: the server ignores it, so setting it would look like a"
+                    + " success and change nothing. Error codes 54 and 55 are gone with it."
+                    + " Remaining fields: enabled, threshold, amount, subscriptionId");
+        }
+    }
+
+    /**
+     * Switch auto top-up on or off without touching the threshold and amount.
      *
      * @param enabled the new state
      * @return the auto top-up state after saving
@@ -851,6 +928,59 @@ public class Api {
         options.periodCode = periodCode;
         options.quantity = quantity;
         return orderCalc(options);
+    }
+
+    /**
+     * Calculate the order MIX ISP.
+     *
+     * <p>{@code mix_isp} is a section of its own, not a flavour of {@code mix}: the server
+     * resolves {@code mix} to IPv4 and {@code mix_isp} to ISP addresses.
+     *
+     * @param mixId            MIX ISP package ObjectId, or the package tag
+     * @param periodId         Period ObjectId, or the period code ({@code 1w}, {@code 1m}, {@code 3m})
+     * @param quantity         The quantity of the order
+     * @param authorization    IP whitelist (if need)
+     * @param coupon           The coupon code
+     * @param customTargetName The custom target name — needed only when the package is not resolved
+     * @return An array containing the order details
+     * @throws Exception Error
+     */
+    public Map orderCalcMixIsp(String mixId, String periodId, Long quantity, String authorization, String coupon, String customTargetName) throws Exception {
+        return orderCalc(prepareMix("mix_isp", mixId, periodId, quantity, authorization, coupon, customTargetName));
+    }
+
+    /**
+     * Calculate the order Shared.
+     *
+     * @param countryId        Country ObjectId, or the alpha-3 country code ({@code USA})
+     * @param periodId         Period ObjectId, or the period code ({@code 1w}, {@code 1m}, {@code 3m})
+     * @param quantity         The quantity of the order
+     * @param authorization    IP whitelist (if need)
+     * @param coupon           The coupon code
+     * @param customTargetName The custom target name — optional for this section
+     * @return An array containing the order details
+     * @throws Exception Error
+     */
+    public Map orderCalcShared(String countryId, String periodId, Long quantity, String authorization, String coupon, String customTargetName) throws Exception {
+        return orderCalc(prepareRegular("shared", countryId, periodId, quantity, authorization, coupon, customTargetName));
+    }
+
+    /**
+     * Calculate the order Scraper.
+     *
+     * <p>Like {@code resident}, a scraper package is priced by tariff — there is no country and
+     * no rent period. Renewal works the same way: the package is extended by buying traffic
+     * through {@code order/make}, and {@code prolong/*} / {@code autoprolong/*} answer
+     * {@code Create new order to add traffic, prolong options not available}.
+     *
+     * @param tarifId Scraper tariff ObjectId, or the tariff code (exact match), from
+     *                {@code reference/list/scraper} → {@code tarifs[].id}
+     * @param coupon  The coupon code
+     * @return An array containing the order details
+     * @throws Exception Error
+     */
+    public Map orderCalcScraper(String tarifId, String coupon) throws Exception {
+        return orderCalc(prepareTariff("scraper", tarifId, coupon));
     }
 
     /**
@@ -1037,6 +1167,71 @@ public class Api {
     }
 
     /**
+     * Create an order MIX ISP.
+     * Attention! Calling this method will deduct $ from your balance!
+     *
+     * @param mixId            MIX ISP package ObjectId, or the package tag
+     * @param periodId         Period ObjectId, or the period code ({@code 1w}, {@code 1m}, {@code 3m})
+     * @param quantity         The quantity of the order
+     * @param authorization    IP whitelist (if need)
+     * @param coupon           The coupon code
+     * @param customTargetName The custom target name — needed only when the package is not resolved
+     * @return An array containing the order details
+     * @throws Exception Error
+     */
+    public Map orderMakeMixIsp(String mixId, String periodId, Long quantity, String authorization, String coupon, String customTargetName) throws Exception {
+        return orderMake(withGenerateAuth(prepareMix("mix_isp", mixId, periodId, quantity, authorization, coupon, customTargetName)));
+    }
+
+    /**
+     * Create an order Shared.
+     * Attention! Calling this method will deduct $ from your balance!
+     *
+     * @param countryId        Country ObjectId, or the alpha-3 country code ({@code USA})
+     * @param periodId         Period ObjectId, or the period code ({@code 1w}, {@code 1m}, {@code 3m})
+     * @param quantity         The quantity of the order
+     * @param authorization    IP whitelist (if need)
+     * @param coupon           The coupon code
+     * @param customTargetName The custom target name — optional for this section
+     * @return An array containing the order details
+     * @throws Exception Error
+     */
+    public Map orderMakeShared(String countryId, String periodId, Long quantity, String authorization, String coupon, String customTargetName) throws Exception {
+        return orderMake(withGenerateAuth(prepareRegular("shared", countryId, periodId, quantity, authorization, coupon, customTargetName)));
+    }
+
+    /**
+     * Create an order Scraper.
+     * Attention! Calling this method will deduct $ from your balance!
+     *
+     * <p>Requires {@code X-Fingerprint} — see {@link #setFingerprint(String)}. Without it the
+     * order service creates nothing, so the SDK refuses the call locally.
+     *
+     * @param tarifId Scraper tariff ObjectId, or the tariff code (exact match)
+     * @param coupon  The coupon code
+     * @return An array containing the order details
+     * @throws IllegalArgumentException when no fingerprint is available
+     * @throws Exception Error
+     */
+    public Map orderMakeScraper(String tarifId, String coupon) throws Exception {
+        return orderMakeScraper(tarifId, coupon, null);
+    }
+
+    /**
+     * Create an order Scraper, overriding {@code X-Fingerprint} for this call only.
+     *
+     * @param tarifId     Scraper tariff ObjectId, or the tariff code (exact match)
+     * @param coupon      The coupon code
+     * @param fingerprint Stable installation identifier; null falls back to
+     *                    {@link #setFingerprint(String)}
+     * @return An array containing the order details
+     * @throws Exception Error
+     */
+    public Map orderMakeScraper(String tarifId, String coupon, String fingerprint) throws Exception {
+        return orderMake(withGenerateAuth(prepareTariff("scraper", tarifId, coupon)), fingerprint);
+    }
+
+    /**
      * Create an order IPv6.
      * Attention! Calling this method will deduct $ from your balance!
      *
@@ -1111,13 +1306,31 @@ public class Api {
      * Create an order Resident.
      * Attention! Calling this method will deduct $ from your balance!
      *
+     * <p>Requires {@code X-Fingerprint} — see {@link #setFingerprint(String)}. Without it the
+     * order service creates nothing, so the SDK refuses the call locally.
+     *
      * @param tarifId Resident tariff ObjectId, or the tariff code (exact match)
      * @param coupon  The coupon code
      * @return An array containing the order details
+     * @throws IllegalArgumentException when no fingerprint is available
      * @throws Exception Error
      */
     public Map orderMakeResident(String tarifId, String coupon) throws Exception {
-        return orderMake(prepareResident(tarifId, coupon));
+        return orderMakeResident(tarifId, coupon, null);
+    }
+
+    /**
+     * Create an order Resident, overriding {@code X-Fingerprint} for this call only.
+     *
+     * @param tarifId     Resident tariff ObjectId, or the tariff code (exact match)
+     * @param coupon      The coupon code
+     * @param fingerprint Stable installation identifier; null falls back to
+     *                    {@link #setFingerprint(String)}
+     * @return An array containing the order details
+     * @throws Exception Error
+     */
+    public Map orderMakeResident(String tarifId, String coupon, String fingerprint) throws Exception {
+        return orderMake(prepareResident(tarifId, coupon), fingerprint);
     }
 
     protected Map prepareRegular(String sectionCode, String countryId, String periodId, Long quantity, String authorization, String coupon, String customTargetName) {
@@ -1135,9 +1348,21 @@ public class Api {
 
     protected Map prepareMix(String mixId, String periodId, Long quantity, String authorization,
                              String coupon, String customTargetName) {
+        return prepareMix("mix", mixId, periodId, quantity, authorization, coupon, customTargetName);
+    }
+
+    /**
+     * Микс бывает двух секций: {@code mix} (IPv4-микс) и {@code mix_isp} (ISP-микс). Раньше
+     * sectionCode был зашит как "mix" даже для ISP-пакета, и сервер
+     * (resolveLegacyReferenceProxyType) разбирал заказ как IPv4.
+     *
+     * @param sectionCode mix или mix_isp
+     */
+    protected Map prepareMix(String sectionCode, String mixId, String periodId, Long quantity,
+                             String authorization, String coupon, String customTargetName) {
         LinkedHashMap<String, Object> map = new LinkedHashMap<>();
         putPayment(map);
-        map.put("sectionCode", "mix");
+        map.put("sectionCode", sectionCode);
         map.put("mixId", mixId);
         map.put("periodId", periodId);
         map.put("quantity", quantity);
@@ -1184,9 +1409,22 @@ public class Api {
     }
 
     protected Map prepareResident(String tarifId, String coupon) {
+        return prepareTariff("resident", tarifId, coupon);
+    }
+
+    /**
+     * Тарифные секции — {@code resident} и {@code scraper}: у них нет ни страны, ни периода,
+     * заказ считается по тарифу (TARIFF_BASED_SECTION_CODES на сервере). Обе требуют
+     * {@code X-Fingerprint} на {@code order/make}.
+     *
+     * @param sectionCode resident или scraper
+     * @param tarifId     Tariff ObjectId, or the tariff code (exact match)
+     * @param coupon      The coupon code
+     */
+    protected Map prepareTariff(String sectionCode, String tarifId, String coupon) {
         LinkedHashMap<String, Object> map = new LinkedHashMap<>();
         putPayment(map);
-        map.put("sectionCode", "resident");
+        map.put("sectionCode", sectionCode);
         map.put("tarifId", tarifId);
         map.put("coupon", coupon);
         return map;
@@ -1298,14 +1536,33 @@ public class Api {
     /**
      * Create an order.
      *
+     * <p>{@code X-Fingerprint} is sent whenever a value is available — see
+     * {@link #setFingerprint(String)}.
+     *
      * @param json A free format map to send to the endpoint.
      * @return The result of the order creation.
+     * @throws IllegalArgumentException on a resident/scraper order with no fingerprint set
      * @throws Exception Error
      */
     public Map orderMake(Map json) throws Exception {
+        return orderMake(json, null);
+    }
+
+    /**
+     * Create an order, overriding {@code X-Fingerprint} for this call only.
+     *
+     * @param json        A free format map to send to the endpoint.
+     * @param fingerprint Stable installation identifier; null falls back to
+     *                    {@link #setFingerprint(String)}.
+     * @return The result of the order creation.
+     * @throws IllegalArgumentException on a resident/scraper order with no fingerprint available
+     * @throws Exception Error
+     */
+    public Map orderMake(Map json, String fingerprint) throws Exception {
         assertTargetName(json);
         RequestOptions options = new RequestOptions();
         options.setJson(json);
+        putIfNotNull(options.getHeaders(), "X-Fingerprint", requireFingerprint(json, fingerprint));
         return ((Map) (request("post", "order/make", options)));
     }
 
@@ -1314,7 +1571,52 @@ public class Api {
      * fields take precedence over their corresponding id fields.
      */
     public Map orderMake(OrderOptions orderOptions) throws Exception {
-        return orderMake(prepareOrderOptions(orderOptions, true));
+        return orderMake(prepareOrderOptions(orderOptions, true), null);
+    }
+
+    /**
+     * Create an order using all fields supported by Client API v2, overriding
+     * {@code X-Fingerprint} for this call only.
+     */
+    public Map orderMake(OrderOptions orderOptions, String fingerprint) throws Exception {
+        return orderMake(prepareOrderOptions(orderOptions, true), fingerprint);
+    }
+
+    /**
+     * Значение X-Fingerprint для конкретного order/make.
+     *
+     * <p>Заголовок объявлен обязательным на всей операции, но прочие секции его игнорируют, так
+     * что при заданном значении шлём его ВСЕГДА. А вот resident и scraper без него не создаются
+     * вовсе: sdk-service отвечает {@code Header X-Fingerprint is required}, деньги не списываются,
+     * заказ не появляется. Отбиваем такой вызов локально — тем же приёмом, что проверку
+     * {@code Set [paymentId]}, чтобы не тратить круг на заведомо отклонённый запрос.
+     *
+     * <p>Значение НЕ генерируем: контракт требует стабильный идентификатор установки, а случайное
+     * значение на процесс ломает анти-фрод и affiliate-атрибуцию, ради которых заголовок и введён.
+     *
+     * @param json        тело заказа
+     * @param override    значение, переданное в конкретный вызов
+     * @return значение заголовка, либо null — заголовок не нужен и не задан
+     */
+    protected String requireFingerprint(Map json, String override) {
+        String value = override != null && !override.trim().isEmpty() ? override.trim() : fingerprint;
+        if (value != null && !value.trim().isEmpty()) {
+            String trimmed = value.trim();
+            if (trimmed.indexOf('\r') >= 0 || trimmed.indexOf('\n') >= 0) {
+                throw new IllegalArgumentException("fingerprint contains forbidden characters (CR/LF)");
+            }
+            return trimmed;
+        }
+        Object rawSection = json == null ? null : json.get("sectionCode");
+        String section = rawSection == null ? null : rawSection.toString().trim();
+        if (FINGERPRINT_REQUIRED_SECTIONS.contains(section)) {
+            throw new IllegalArgumentException("X-Fingerprint is required for " + section
+                    + " orders (client api returns \"Header X-Fingerprint is required\" and creates"
+                    + " nothing). Set a STABLE identifier of your installation with setFingerprint(...),"
+                    + " with new Config(key, baseUri, fingerprint), or pass it to"
+                    + " orderMake(json, fingerprint) — do not generate a fresh value per process");
+        }
+        return null;
     }
 
     private Map prepareOrderOptions(OrderOptions orderOptions, boolean makeOrder) {
@@ -1503,6 +1805,261 @@ public class Api {
         }
         // (message, businessCode, customData, httpStatus, responseBody, responseData)
         throw new ApiException(message, 0, null, 200, null, data);
+    }
+
+    /**
+     * Calculate the upcoming automatic extension charge.
+     *
+     * <p>Nothing is changed and nothing is charged — the call answers what automatic extension
+     * will cost and <b>when</b> it will be taken. Selection and reference fields are the same as
+     * {@code prolong/calc}, plus {@code subscriptionId} and {@code tarifId}
+     * ({@link AutoProlongOptions}).
+     *
+     * <p>Returned fields: {@code warning}, {@code balance}, {@code total}, {@code quantity},
+     * {@code currency}, {@code discount}, {@code orders}, {@code items[]}, {@code days}
+     * (null for resident), {@code tarifId} (resident only), {@code chargeDate} (null for
+     * resident), {@code dateEnd}, {@code paymentId} and {@code autoProlong}. Dates are strings
+     * in {@code yyyy-MM-dd HH:mm:ss}.
+     *
+     * <p>{@code chargeDate} is <b>not</b> the expiry date: one extension mechanism charges a day
+     * before the proxy expires, the other on the expiry day itself, and the value is computed
+     * from whichever runs now. Treat it as the deadline for having funds on the balance.
+     *
+     * <p>A balance that will not cover the charge is <b>not</b> an exception: the envelope comes
+     * as {@code status:"error"} with a filled {@code data} and an empty {@code errors} array —
+     * the same shape {@code prolong/calc} uses — and that {@code data} (with {@code warning}) is
+     * returned normally.
+     *
+     * @param type              ipv4, ipv6, mobile, isp, mix, mix_isp or resident
+     * @param autoProlongOptions selection, period and payment system
+     * @return The calculated charge.
+     * @throws IllegalArgumentException for {@code scraper}, or with no payment system set
+     * @throws Exception Error
+     */
+    public Map autoProlongCalc(String type, AutoProlongOptions autoProlongOptions) throws Exception {
+        RequestOptions options = new RequestOptions();
+        options.setJson(prepareAutoProlong(type, autoProlongOptions, true));
+        return ((Map) (request("post", "autoprolong/calc/" + encodePathSegment(type), options)));
+    }
+
+    /**
+     * Calculate the upcoming automatic extension charge for the given proxies.
+     *
+     * @param type     The type of the proxies (ipv4, ipv6, mobile, isp, mix, mix_isp).
+     * @param ipsOrIds The addresses themselves, exactly as {@code proxy/list} returns them, or
+     *                 ObjectId strings — routed by shape, see
+     *                 {@link #prolongCalc(String, List, String, String)}.
+     * @param periodId Period ObjectId, or the period code ({@code 1w}, {@code 1m}, {@code 3m}).
+     *                 Required by calc and enable; the period is what the charge will buy.
+     * @return The calculated charge.
+     * @throws Exception Error
+     */
+    public Map autoProlongCalc(String type, List ipsOrIds, String periodId) throws Exception {
+        AutoProlongOptions autoProlongOptions = new AutoProlongOptions();
+        routeProlongTargets(autoProlongOptions, ipsOrIds);
+        autoProlongOptions.periodId = periodId;
+        return autoProlongCalc(type, autoProlongOptions);
+    }
+
+    /**
+     * Calculate the upcoming automatic extension charge of the resident package.
+     *
+     * <p>The unit here is the package, not addresses: no {@code ids}/{@code ips} and no
+     * {@code periodId}. The answer carries {@code quantity: 1}, the tariff's own period in
+     * {@code days} and a null {@code chargeDate} — a resident package renews on expiry OR on
+     * traffic exhaustion, so no single date describes it; read {@code dateEnd} instead.
+     *
+     * @param tarifId The tariff currently on the package, or null. Auto-renewal cannot switch
+     *                tariffs, so any other value is rejected with
+     *                {@code Set [tarifId] from package: <code>}.
+     * @return The calculated charge.
+     * @throws Exception Error
+     */
+    public Map autoProlongCalcResident(String tarifId) throws Exception {
+        AutoProlongOptions autoProlongOptions = new AutoProlongOptions();
+        autoProlongOptions.tarifId = tarifId;
+        return autoProlongCalc("resident", autoProlongOptions);
+    }
+
+    /**
+     * Calculate the upcoming automatic extension charge of the resident package, leaving the
+     * tariff to the server — it is the one on the package either way.
+     *
+     * @return The calculated charge.
+     * @throws Exception Error
+     */
+    public Map autoProlongCalcResident() throws Exception {
+        return autoProlongCalcResident(null);
+    }
+
+    /**
+     * Enable automatic extension.
+     *
+     * <p>Nothing is charged now — the call arms the charge and binds the period and the payment
+     * system to the selected proxies. {@code paymentId} is <b>mandatory</b> here (unlike
+     * {@code prolong/calc}): the charge happens while you are not there. Only {@code balance} and
+     * {@code paddle_subscription} are accepted, and {@code paddle_subscription} additionally
+     * needs {@link AutoProlongOptions#subscriptionId}.
+     *
+     * <p>Returned fields: {@code warning}, {@code autoProlong}, {@code quantity}, {@code ids[]},
+     * {@code days}, {@code paymentId}, {@code chargeDate} and {@code dateEnd}. For {@code ipv6}
+     * the whole order is switched on at once, so {@code quantity}/{@code ids} may cover more
+     * proxies than were sent — they are not an echo of the request.
+     *
+     * @param type               ipv4, ipv6, mobile, isp, mix, mix_isp or resident
+     * @param autoProlongOptions selection, period and payment system
+     * @return The new automatic-extension state.
+     * @throws IllegalArgumentException for {@code scraper}, or with no payment system set
+     * @throws Exception Error
+     */
+    public Map autoProlongEnable(String type, AutoProlongOptions autoProlongOptions) throws Exception {
+        RequestOptions options = new RequestOptions();
+        options.setJson(prepareAutoProlong(type, autoProlongOptions, true));
+        return ((Map) (request("post", "autoprolong/enable/" + encodePathSegment(type), options)));
+    }
+
+    /**
+     * Enable automatic extension for the given proxies.
+     *
+     * @param type     The type of the proxies (ipv4, ipv6, mobile, isp, mix, mix_isp).
+     * @param ipsOrIds The addresses themselves or ObjectId strings — routed by shape.
+     * @param periodId Period ObjectId, or the period code — the period the charge will buy.
+     * @return The new automatic-extension state.
+     * @throws Exception Error
+     */
+    public Map autoProlongEnable(String type, List ipsOrIds, String periodId) throws Exception {
+        AutoProlongOptions autoProlongOptions = new AutoProlongOptions();
+        routeProlongTargets(autoProlongOptions, ipsOrIds);
+        autoProlongOptions.periodId = periodId;
+        return autoProlongEnable(type, autoProlongOptions);
+    }
+
+    /**
+     * Enable automatic extension of the resident package.
+     *
+     * <p>Replaces the removed {@code resident/autorenew/enable}. The body is the package-shaped
+     * one — a payment system and nothing else — and the answer reports {@code quantity: 1} with
+     * an empty {@code ids}.
+     *
+     * @param tarifId The tariff currently on the package, or null.
+     * @return The new automatic-extension state.
+     * @throws Exception Error
+     */
+    public Map autoProlongEnableResident(String tarifId) throws Exception {
+        AutoProlongOptions autoProlongOptions = new AutoProlongOptions();
+        autoProlongOptions.tarifId = tarifId;
+        return autoProlongEnable("resident", autoProlongOptions);
+    }
+
+    /**
+     * Enable automatic extension of the resident package on its current tariff.
+     *
+     * @return The new automatic-extension state.
+     * @throws Exception Error
+     */
+    public Map autoProlongEnableResident() throws Exception {
+        return autoProlongEnableResident(null);
+    }
+
+    /**
+     * Disable automatic extension.
+     *
+     * <p>Neither the period nor the payment system is required here — only the selection. Both
+     * are cleared, so a later {@link #autoProlongEnable(String, AutoProlongOptions)} has to send
+     * them again; in the answer {@code days}, {@code paymentId} and {@code chargeDate} are null
+     * while {@code dateEnd} still shows how long the proxies keep working.
+     *
+     * @param type               ipv4, ipv6, mobile, isp, mix, mix_isp or resident
+     * @param autoProlongOptions the selection to switch off
+     * @return The new automatic-extension state.
+     * @throws IllegalArgumentException for {@code scraper}
+     * @throws Exception Error
+     */
+    public Map autoProlongDisable(String type, AutoProlongOptions autoProlongOptions) throws Exception {
+        RequestOptions options = new RequestOptions();
+        options.setJson(prepareAutoProlong(type, autoProlongOptions, false));
+        return ((Map) (request("post", "autoprolong/disable/" + encodePathSegment(type), options)));
+    }
+
+    /**
+     * Disable automatic extension for the given proxies.
+     *
+     * @param type     The type of the proxies (ipv4, ipv6, mobile, isp, mix, mix_isp).
+     * @param ipsOrIds The addresses themselves or ObjectId strings — routed by shape.
+     * @return The new automatic-extension state.
+     * @throws Exception Error
+     */
+    public Map autoProlongDisable(String type, List ipsOrIds) throws Exception {
+        AutoProlongOptions autoProlongOptions = new AutoProlongOptions();
+        routeProlongTargets(autoProlongOptions, ipsOrIds);
+        return autoProlongDisable(type, autoProlongOptions);
+    }
+
+    /**
+     * Disable automatic extension of the resident package.
+     *
+     * <p>Replaces the removed {@code resident/autorenew/disable}. The package of the calling
+     * account is addressed implicitly, so no body fields are needed at all.
+     *
+     * @return The new automatic-extension state.
+     * @throws Exception Error
+     */
+    public Map autoProlongDisableResident() throws Exception {
+        return autoProlongDisable("resident", new AutoProlongOptions());
+    }
+
+    private Map prepareAutoProlong(String type, AutoProlongOptions autoProlongOptions, boolean paymentRequired) {
+        assertAutoProlongType(type);
+        Map map = prepareProlong(autoProlongOptions);
+        if (paymentRequired) {
+            assertAutoProlongPayment(map);
+        }
+        return map;
+    }
+
+    /**
+     * Скрапер автопродления НЕ поддерживает: пакет продлевают покупкой трафика через order/make,
+     * и сервер отвечает ровно этим текстом (ClientApiService.prepareAutoProlong, ветка
+     * isTariffBasedSection). Отбиваем локально — как и остальные заведомо отклонённые запросы.
+     *
+     * @param type тип из сегмента пути
+     */
+    protected static void assertAutoProlongType(String type) {
+        String normalized = type == null ? "" : type.trim().toLowerCase();
+        if (normalized.isEmpty()) {
+            throw new IllegalArgumentException("type is required for autoprolong"
+                    + " (ipv4, ipv6, mobile, isp, mix, mix_isp, resident)");
+        }
+        if ("scraper".equals(normalized)) {
+            throw new IllegalArgumentException("autoprolong is not available for scraper:"
+                    + " a scraper package is extended by buying traffic through order/make"
+                    + " (client api returns \"Create new order to add traffic,"
+                    + " prolong options not available\")");
+        }
+    }
+
+    /**
+     * Платёжка на calc и enable ОБЯЗАТЕЛЬНА — в отличие от prolong/calc, где она опциональна:
+     * списание произойдёт без клиента, и «по умолчанию с баланса» было бы догадкой за него.
+     * Сервер отвечает "Set [paymentId]", допускает только balance и paddle_subscription, а для
+     * подписки дополнительно требует subscriptionId.
+     *
+     * @param json тело запроса автопродления
+     */
+    private static void assertAutoProlongPayment(Map json) {
+        Object code = json == null ? null : json.get("paymentCode");
+        Object id = json == null ? null : json.get("paymentId");
+        if (!isFilled(code) && !isFilled(id)) {
+            throw new IllegalArgumentException("Set [paymentId]: autoprolong charges while you are"
+                    + " not there, so the payment system cannot be guessed. Only balance and"
+                    + " paddle_subscription are accepted — use setPaymentCode(\"balance\"),"
+                    + " setPaymentId(...) or the paymentId/paymentCode field of AutoProlongOptions");
+        }
+        String payment = (isFilled(code) ? code : id).toString().trim();
+        if ("paddle_subscription".equals(payment) && !isFilled(json.get("subscriptionId"))) {
+            throw new IllegalArgumentException("Set [subscriptionId]: paddle_subscription charges a"
+                    + " Paddle subscription, and it has to belong to this account");
+        }
     }
 
     /**
@@ -1701,10 +2258,13 @@ public class Api {
     /**
      * Package Information. Remaining traffic, end date.
      *
-     * <p>Field names here are camelCase ({@code packageKey}, {@code trafficLeft},
-     * {@code expiredAt}, ...) and {@code expiredAt} is a <b>string</b> in
-     * {@code dd.MM.yyyy HH:mm:ss}. The {@code residentsubuser/*} endpoints differ on both
-     * counts: snake_case keys and {@code expired_at} as a PHP date object.
+     * <p>Field names here are <b>snake_case</b>: {@code package_key}, {@code is_active},
+     * {@code tarif_id}, {@code is_link_date}, {@code traffic_limit}, {@code traffic_usage},
+     * {@code traffic_left}, the {@code *_sub} and {@code *_formatted} twins of the counters,
+     * {@code expired_at}, {@code auto_renew}, {@code auto_renew_payment_id} and
+     * {@code rotation}. {@code expired_at} is a <b>string</b> in {@code dd.MM.yyyy HH:mm:ss} —
+     * that is where this endpoint does differ from {@code residentsubuser/*}, which returns the
+     * same key as a PHP date object.
      *
      * @return map
      * @throws Exception Error
@@ -1736,8 +2296,14 @@ public class Api {
      * {@code package_key} as on the {@code residentsubuser/*} endpoints.
      * Optional filter fields: {@code login}, {@code date_start}, {@code date_end}.
      *
+     * <p>When there is traffic, {@code data} is an object grouped by list login and usage time.
+     * When the period is <b>empty</b> the server sends an empty <b>array</b> {@code []} instead —
+     * byte-for-byte what v1 did, where an empty PHP associative array serializes to {@code []}
+     * rather than {@code {}}. That is a normal successful answer, so it is normalised to an empty
+     * map here; casting it straight to {@code Map} used to throw {@link ClassCastException}.
+     *
      * @param filter A free format map with the filter (may be null).
-     * @return map
+     * @return map, empty when the period holds no traffic
      * @throws Exception Error
      */
     public Map residentTrafficDetails(Map filter) throws Exception {
@@ -1745,7 +2311,19 @@ public class Api {
         if (filter != null) {
             options.setJson(filter);
         }
-        return ((Map) (request("post", "resident/traffic/details", options)));
+        Object data = request("post", "resident/traffic/details", options);
+        if (data instanceof Map) {
+            return (Map) data;
+        }
+        // Единственная НЕ-Map форма по контракту — пустой массив. Непустой список сюда прийти
+        // не может, но и в этом случае молчать нельзя: вернуть пустую карту значило бы
+        // потерять данные, поэтому отдаём их под ключом items, а не выбрасываем.
+        if (data instanceof Collection && !((Collection) data).isEmpty()) {
+            LinkedHashMap<Object, Object> wrapped = new LinkedHashMap<>();
+            wrapped.put("items", data);
+            return wrapped;
+        }
+        return new LinkedHashMap<>();
     }
 
     /**
@@ -2348,6 +2926,11 @@ public class Api {
         }
         config.setBaseUri(resolveBaseUri(config.getBaseUri(), config.getKey()));
         this.config = config;
+        // Уже заданный сеттером fingerprint не сбрасываем: конфиг меняют ради хоста и таймаутов,
+        // а молчаливая потеря значения проявилась бы только отказом резидентского заказа.
+        if (config.getFingerprint() != null && !config.getFingerprint().isBlank()) {
+            this.fingerprint = config.getFingerprint();
+        }
     }
 
 

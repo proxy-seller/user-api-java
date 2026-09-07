@@ -15,8 +15,12 @@ import java.util.Map;
  *
  * <p>Validation is entirely server side and is applied to the <i>merged</i> result,
  * so a locally valid partial request can still be rejected. Boundary values of a
- * rejection ({@code minAmount}, {@code minThreshold}, {@code minDailyCountCap})
- * arrive in {@code errors[0].customData}.
+ * rejection ({@code minAmount}, {@code minThreshold}) arrive in
+ * {@code errors[0].customData}.
+ *
+ * <p>{@code dailyCountCap} and {@code monthlyAmountCap} were <b>removed from the contract</b>
+ * on 2026-08-18 and are silently ignored by the server, so they are gone from here too — see
+ * {@link Api#balanceAutoTopupSet(Map)}.
  */
 public class AutoTopupOptions {
 
@@ -36,12 +40,6 @@ public class AutoTopupOptions {
      */
     public String subscriptionId;
 
-    /** Own (stricter) cap on the number of charges per day. Not set - kept. */
-    public Integer dailyCountCap;
-
-    /** Own cap on the total charged over 30 days. Not set - kept. */
-    public BigDecimal monthlyAmountCap;
-
     /**
      * @return only the fields that were actually set, so an omitted field never
      *         travels as null
@@ -52,8 +50,6 @@ public class AutoTopupOptions {
         put(map, "threshold", threshold);
         put(map, "amount", amount);
         put(map, "subscriptionId", subscriptionId);
-        put(map, "dailyCountCap", dailyCountCap);
-        put(map, "monthlyAmountCap", monthlyAmountCap);
         return map;
     }
 

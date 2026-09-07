@@ -9,7 +9,8 @@ import java.util.Map;
  *
  * <p>{@code periodId} and {@code paymentId} accept <b>an ObjectId or the matching code</b> — the
  * server falls back to a code lookup when the value is not a valid id and the paired {@code *Code}
- * field is empty. Setting a {@code *Code} field drops the paired {@code *Id} from the payload.
+ * field is empty. Setting a non-blank {@code *Code} field drops the paired {@code *Id} from the
+ * payload — for these two pairs the server does prefer the code.
  */
 public class ProlongOptions {
     /** IP address ids to renew (ObjectId strings). */
@@ -51,13 +52,18 @@ public class ProlongOptions {
         put(map, "periodCode", periodCode);
         put(map, "paymentId", paymentId);
         put(map, "paymentCode", paymentCode);
-        if (periodCode != null) {
-            map.remove("periodId");
-        }
-        if (paymentCode != null) {
-            map.remove("paymentId");
-        }
+        // Обе пары прольонга — из тех, где старше code (normalizeProlongReferenceCodes: ветка
+        // кода на парный id не смотрит). Пустая строка при этом кодом НЕ считается: сервер везде
+        // проходит значение через trimToNull, а прежняя проверка на != null стирала валидный id.
+        preferCode(map, "periodId", periodCode);
+        preferCode(map, "paymentId", paymentCode);
         return map;
+    }
+
+    private static void preferCode(Map<Object, Object> map, String idKey, String code) {
+        if (code != null && !code.trim().isEmpty()) {
+            map.remove(idKey);
+        }
     }
 
     private static void put(Map<Object, Object> map, String key, Object value) {

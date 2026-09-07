@@ -12,6 +12,11 @@ Prebuilt jars for v2 live in
 `proxy-seller-user-api-2.0-standalone.jar` (fat jar, Gson included), plus the
 sources and javadoc jars. They are produced by `./gradlew build_standalone`.
 
+> ⚠️ **The jars in `dist/` are behind the sources** and predate `ProlongOptions.ips`,
+> `X-Fingerprint` and the `autoprolong/*` methods. Until they are regenerated
+> (`./gradlew build_standalone`), build from source or take the artifact from maven-central —
+> the examples in this README assume the current sources.
+
 Requires **JDK 17+**. **Android is not supported** — see [Platform support](#platform-support).
 
 ## Quick start
@@ -46,6 +51,29 @@ api.setPaymentId((String) payments.get(0).get("id"));
 This is the one place where an id is unavoidable: several payment systems share the same internal
 code (a single `cryptomus` covers "USDT (TRC-20)", "All cryptocurrencies" and more), so the code
 cannot tell them apart. Everywhere else you use human-readable codes.
+
+### Residential and scraper orders need a fingerprint
+
+`order/make` carries an `X-Fingerprint` header. Most sections ignore it, but **residential and
+scraper orders are not created without it at all** — the order service answers `Header
+X-Fingerprint is required` and nothing is ordered. Set it once:
+
+```java
+Api api = new Api(new Config("YOUR_API_KEY", null, "your-installation-id"));
+// or later:
+api.setFingerprint("your-installation-id");
+// or for a single call:
+api.orderMakeResident("tarif-code", null, "your-installation-id");
+```
+
+Any opaque string is accepted — the server does not validate its shape — but it must be a
+**stable identifier of your installation**. The SDK deliberately does not generate one for you: a
+value randomized per process would break the anti-fraud and affiliate attribution the header
+exists for.
+
+Call `orderMakeResident(...)` or a scraper order without a fingerprint and the SDK throws
+`IllegalArgumentException` locally, rather than spending a round trip on a request the server is
+certain to reject.
 
 <details>
 <summary>Pointing the client at another host, and timeouts</summary>
@@ -268,6 +296,59 @@ api.prolongCalc("mix", prolong);
 
 </details>
 
+## Automatic renewal
+
+`prolong/make` charges you now. `autoprolong/*` only arms a charge that happens later, without
+you present — so it is a separate branch of the API, not a flag on `prolong`.
+
+```java
+AutoProlongOptions auto = new AutoProlongOptions();
+auto.ips = List.of("1.2.3.4");
+auto.periodId = "1m";
+auto.paymentId = "balance";                     // mandatory here
+
+api.autoProlongCalc("ipv4", auto);              // what will be charged, and when
+api.autoProlongEnable("ipv4", auto);            // arm it
+api.autoProlongDisable("ipv4", auto);           // disarm it
+```
+
+Shorter forms take the addresses directly, exactly like `prolongCalc`:
+
+```java
+api.autoProlongCalc("ipv4", List.of("1.2.3.4"), "1m");
+api.autoProlongEnable("ipv4", List.of("1.2.3.4"), "1m");
+api.autoProlongDisable("ipv4", List.of("1.2.3.4"));
+```
+
+`paymentId` is **mandatory** for `calc` and `enable` — the charge happens while you are away, so
+the payment system cannot be guessed. Only `balance` and `paddle_subscription` are accepted: a
+one-off Paddle checkout needs a browser redirect a headless client cannot complete. With
+`paddle_subscription` also set `subscriptionId`.
+
+Residential packages renew as a package, not as addresses — send no selection at all:
+
+```java
+api.autoProlongCalcResident();                  // or ...Resident("tarif-code") to confirm the tariff
+api.autoProlongEnableResident();
+api.autoProlongDisableResident();
+```
+
+Three things about the answers are worth knowing before you parse them:
+
+* **`ids` is not an echo.** For `ipv6` the whole order is switched at once, so `quantity` and
+  `ids` can cover more proxies than you sent.
+* **Not enough money is not an exception.** `calc` answers `status: "error"` with a *filled*
+  `data` block and an empty `errors[]` — the same shape `prolong/calc` uses. Read `warning`.
+* **Residential fills different fields.** `days` and `chargeDate` are null there (a package
+  renews on expiry *or* on traffic exhaustion, so no single date describes it); `tarifId` and
+  `dateEnd` carry the meaning instead.
+
+`scraper` has no auto-renewal: it is extended by buying traffic through `order/make`, and the
+endpoint answers `Create new order to add traffic, prolong options not available`.
+
+> Replaces `resident/autorenew/{enable,disable,calculate}`, which have been **removed** from the
+> server. The body is the same apart from the field spelling.
+
 ## Balance
 
 `balance/add` accepts **paymentId only** — unlike `order/*` and `prolong/*` it
@@ -290,7 +371,7 @@ read is needed.
 ```java
 Map state = api.balanceAutoTopupGet();
 // configured, enabled, state, threshold, amount, subscriptionId, paymentMethod,
-// dailyCountCap, monthlyAmountCap, failCount, lastAttemptAt, lastEvent
+// failCount, lastAttemptAt, lastEvent
 ```
 
 `state` is one of `NO_PAYMENT_METHOD`, `DISABLED`, `ACTIVE`, `PAYMENT_INVALID`,
@@ -310,7 +391,7 @@ api.balanceAutoTopupSet(false);                          // just switch it off
 
 Validation is entirely server side and runs against the **merged** result, so a
 locally valid partial request can still be rejected. Rejections arrive as
-business codes 49-56:
+business codes 49-53 and 56:
 
 | code | meaning |
 |---|---|
@@ -319,9 +400,12 @@ business codes 49-56:
 | 51 | amount below the minimum (`customData.minAmount`) |
 | 52 | amount does not cover the threshold |
 | 53 | no saved payment method |
-| 54 | daily count cap below the minimum (`customData.minDailyCountCap`) |
-| 55 | monthly cap does not cover a single top-up |
 | 56 | the saved card has expired |
+
+> Codes 54 and 55 belonged to `dailyCountCap` / `monthlyAmountCap`, removed from the contract on
+> 2026-08-18. They are not reused, and `customData` no longer carries `minDailyCountCap`.
+> `balanceAutoTopupSet` now rejects both fields locally — the server ignores them, so sending
+> them produced a call that reported success and changed nothing.
 
 ```java
 try {
@@ -564,6 +648,14 @@ breaks the most code.
 * prolongCalc
 * prolongMake
 
+### Automatic renewal
+* autoProlongCalc
+* autoProlongEnable
+* autoProlongDisable
+* autoProlongCalcResident
+* autoProlongEnableResident
+* autoProlongDisableResident
+
 ### Proxy
 * proxyList
 * proxyDownload
@@ -599,6 +691,20 @@ breaks the most code.
 
 ## Changelog
 ```
+2.0.1
++ autoProlongCalc / autoProlongEnable / autoProlongDisable (+ ...Resident variants)
+  for autoprolong/{calc,enable,disable}/{type}
++ X-Fingerprint on order/make: Config(key, baseUri, fingerprint), setFingerprint(),
+  or a per-call argument. Residential and scraper orders now fail locally without it
+  instead of being rejected by the server
++ RequestOptions.getHeaders() — arbitrary request headers
+! server removed resident/autorenew/{enable,disable,calculate}; use autoprolong/*/resident
+! balanceAutoTopupSet no longer accepts dailyCountCap / monthlyAmountCap (removed from the
+  contract 2026-08-18, silently ignored by the server) — passing them now throws
+! auto top-up error codes 54 and 55 are gone; customData no longer carries minDailyCountCap
+! *Code no longer overrides a paired *Id for mixId, operatorId, rotationId and tarifId —
+  the server gives the id priority there, and the SDK was inverting it
+
 2.0
 Client API v2. Breaking changes:
 ! base url moved to /personal/api/v2/, the api key is a path segment

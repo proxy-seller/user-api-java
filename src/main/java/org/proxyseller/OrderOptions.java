@@ -12,8 +12,12 @@ import java.util.Map;
  * is for what they have no argument for — {@code protocol}, {@code uptime}, a per-request payment
  * system, {@code generateAuth}, or a mix selected through {@code countryId}.
  *
- * <p>Setting a {@code *Code} field drops the paired {@code *Id} from the payload
- * ({@link #toMap(boolean)}). The one field with no code form is {@link #rotationId} — minutes.
+ * <p>Setting {@link #countryCode}, {@link #periodCode} or {@link #paymentCode} drops the paired
+ * {@code *Id} from the payload ({@link #toMap(boolean)}) — the server prefers the code there.
+ * For {@link #operatorCode}, {@link #rotationCode}, {@link #mixCode} and {@link #tarifCode} it is
+ * the other way round: the server applies the code only while the paired {@code *Id} is empty,
+ * so both halves are sent as they were set and the server resolves them. The one field with no
+ * code form is {@link #rotationId} — minutes.
  */
 public class OrderOptions {
     /** Country ObjectId, or the alpha-3 country code ({@code USA}); upper-cased server-side. */
@@ -93,13 +97,16 @@ public class OrderOptions {
             put(map, "generateAuth", generateAuth);
         }
 
+        // Приоритет пары *Id / *Code на СЕРВЕРЕ не одинаков для всех семи полей
+        // (ClientApiService.normalizeOrderReferenceCodes). Старше code только у трёх:
+        // countryCode, periodCode, paymentCode — их ветка не смотрит на парный id вовсе.
         preferCode(map, "countryId", "countryCode", countryCode);
         preferCode(map, "periodId", "periodCode", periodCode);
         preferCode(map, "paymentId", "paymentCode", paymentCode);
-        preferCode(map, "mixId", "mixCode", mixCode);
-        preferCode(map, "operatorId", "operatorCode", operatorCode);
-        preferCode(map, "rotationId", "rotationCode", rotationCode);
-        preferCode(map, "tarifId", "tarifCode", tarifCode);
+        // А operatorCode / rotationCode / mixCode / tarifCode применяются, ТОЛЬКО когда парный
+        // *Id пуст (`if (code && !trimToNull(id))`). Раньше SDK и здесь стирал *Id — клиент,
+        // заполнивший обе половины, молча получал не тот пакет/оператора/ротацию/тариф, который
+        // выбрал бы сервер. Отправляем обе половины как есть и даём серверу разрешить.
         return map;
     }
 
@@ -109,8 +116,13 @@ public class OrderOptions {
         }
     }
 
+    /**
+     * Пустая строка — это НЕ заданный код: сервер везде проходит значение через trimToNull,
+     * так что {@code countryCode = ""} не стёр бы валидный countryId, а прежняя проверка на
+     * {@code != null} стирала.
+     */
     private static void preferCode(Map<Object, Object> map, String idKey, String codeKey, String code) {
-        if (code != null) {
+        if (code != null && !code.trim().isEmpty()) {
             map.remove(idKey);
             map.put(codeKey, code);
         }
