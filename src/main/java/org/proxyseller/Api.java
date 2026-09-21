@@ -1583,6 +1583,46 @@ public class Api {
     }
 
     /**
+     * Get the list of orders, unfiltered.
+     *
+     * @return The list of orders — see {@link #orderList(OrderListOptions)} for its shape.
+     * @throws Exception Error
+     */
+    public Map orderList() throws Exception {
+        return orderList(null);
+    }
+
+    /**
+     * Get the list of orders with filters.
+     *
+     * <p>{@code data} is not a flat list but a {@code metadata} + {@code items} pair — the v1
+     * shape, because the same response reaches legacy-API clients through the reverse mirror.
+     * {@code metadata} (total_orders, total_pages, current_page, current_limit) is always there:
+     * without {@code limit} it reports {@code total_pages = 1}, {@code current_limit = 0} and the
+     * whole list sits in {@code items}.
+     *
+     * <p>{@code id}, {@code order_id}, {@code order_number}, {@code base_order_number} and
+     * {@code items[].order_part_id} are <b>strings</b>. {@code id} is the legacy bitrix number (or
+     * a deterministic surrogate of {@code base_order_number}); our ObjectId lives in
+     * {@code order_id} — the same value {@code proxy/list} returns as {@code order_id}. {@code summ}
+     * and the nested {@code items[].price} are strings with the currency already in them
+     * ({@code $25.00}), {@code auto_order} / {@code is_extend} are {@code Y}/{@code N}, and the
+     * dates are ISO 8601 with offset, {@code 2026-09-01T14:15:26+00:00} ({@code date_payed} is null until the order is paid).
+     *
+     * @param orderListOptions The filters; {@code null} means no filters at all.
+     * @return The list of orders.
+     * @throws Exception Error
+     */
+    public Map orderList(OrderListOptions orderListOptions) throws Exception {
+        RequestOptions options = new RequestOptions();
+        options.setQuery(orderListOptions == null
+                ? new LinkedHashMap<>()
+                : orderListOptions.toMap());
+
+        return ((Map) (request("get", "order/list", options)));
+    }
+
+    /**
      * Значение X-Fingerprint для конкретного order/make.
      *
      * <p>Заголовок объявлен обязательным на всей операции, но прочие секции его игнорируют, так

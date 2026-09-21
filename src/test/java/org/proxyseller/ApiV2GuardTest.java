@@ -230,6 +230,54 @@ class ApiV2GuardTest {
         assertFalse(payload.containsKey("ids"), "ids must be absent: the server prefers it over ips");
     }
 
+    // --- order/list: имена фильтров взяты из v1, а не из proxy/list -----------------
+
+    /**
+     * Фильтры order/list называются в snake_case, как в client-api v1
+     * ({@code OrderController.orderList}), а не в camelCase {@code proxy/list}: ту же ручку
+     * через обратное зеркало зовут клиенты легаси-API. Переименование сломало бы их молча —
+     * запрос бы ушёл, фильтр бы не применился.
+     */
+    @Test
+    void orderListOptionsUseV1FilterNames() {
+        OrderListOptions options = new OrderListOptions();
+        options.orderId = "68b1f0c4e13a4c0f1a2b3c11";
+        options.startDate = "01.06.2023";
+        options.endDate = "30.06.2023";
+        options.status = "PAYED";
+        options.isExtend = "Y";
+        options.autoOrder = "N";
+        options.page = 1;
+        options.limit = 20;
+        options.sortBy = "date_insert";
+        options.order = "desc";
+
+        Map<Object, Object> query = options.toMap();
+        assertEquals(10, query.size());
+        assertEquals("68b1f0c4e13a4c0f1a2b3c11", query.get("order_id"));
+        assertEquals("01.06.2023", query.get("start_date"));
+        assertEquals("30.06.2023", query.get("end_date"));
+        assertEquals("PAYED", query.get("status"));
+        assertEquals("Y", query.get("is_extend"));
+        assertEquals("N", query.get("auto_order"));
+        assertEquals(1, query.get("page"));
+        assertEquals(20, query.get("limit"));
+        assertEquals("date_insert", query.get("sort_by"));
+        assertEquals("desc", query.get("order"));
+        assertFalse(query.containsKey("orderId"), "camelCase would silently disable the filter");
+    }
+
+    /** Все фильтры опциональны: незаданное поле не должно уезжать как пустой параметр. */
+    @Test
+    void orderListOptionsSendOnlyWhatWasSet() {
+        OrderListOptions options = new OrderListOptions();
+        options.status = "NOT_PAYED";
+        Map<Object, Object> query = options.toMap();
+        assertEquals(1, query.size());
+        assertEquals("NOT_PAYED", query.get("status"));
+        assertTrue(new OrderListOptions().toMap().isEmpty());
+    }
+
     private static Map<String, Object> errorItem(String message, int code) {
         LinkedHashMap<String, Object> item = new LinkedHashMap<>();
         item.put("message", message);

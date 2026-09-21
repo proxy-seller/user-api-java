@@ -244,6 +244,35 @@ drops the corresponding `*Id` from the payload. `rotationCode` is the exception 
 the server does not resolve it, so use `rotationId` (see
 [Mobile rotation](#mobile-rotation-is-a-number-of-minutes)).
 
+## Listing orders
+
+`orderList()` has no mandatory argument and ten optional filters, so it takes
+`OrderListOptions` rather than a positional form that would be ten `null`s at every
+call site — the same reason `OrderOptions` exists:
+
+```java
+OrderListOptions filters = new OrderListOptions();
+filters.status = "PAYED";        // PAYED | NOT_PAYED | RETURN — the status_type of the response
+filters.sortBy = "date_insert";  // date_insert | summ | status
+filters.order = "desc";
+filters.page = 1;
+filters.limit = 20;
+Map orders = api.orderList(filters);
+
+Map all = api.orderList();       // the same call with no filters at all
+```
+
+On the wire the filters keep the snake_case names of v1 — `order_id`, `start_date`,
+`end_date`, `status`, `is_extend`, `auto_order`, `page`, `limit`, `sort_by`, `order` —
+because the same endpoint answers legacy-API clients through the reverse mirror.
+
+`data` is not a flat list but a `metadata` + `items` pair, and `metadata` is always
+there: without `limit` it reports `total_pages = 1`, `current_limit = 0` and the whole
+list in `items`. `summ` and `items[].price` are **strings with the currency already in
+them** (`$25.00`), `auto_order` and `is_extend` are `Y`/`N` rather than booleans, and
+the dates are ISO 8601 with offset (`2026-09-01T14:15:26+00:00`). `id` is the legacy bitrix number as a string; the
+ObjectId is `order_id` — the same value `proxyList()` returns as `order_id`.
+
 ## Renewing proxies
 
 Renew by the addresses themselves — the same strings `proxyList()` gives you. No ids to look up:
@@ -643,6 +672,7 @@ breaks the most code.
 * orderMakeResident
 * orderCalc
 * orderMake
+* orderList
 
 ### Prolong
 * prolongCalc
@@ -692,6 +722,11 @@ breaks the most code.
 ## Changelog
 ```
 2.0.1
++ orderList() / orderList(OrderListOptions) for GET order/list. Ten optional filters,
+  all of them under the v1 snake_case names (order_id, start_date, end_date, status,
+  is_extend, auto_order, page, limit, sort_by, order), because legacy-API clients reach
+  the same endpoint through the reverse mirror. data is a metadata + items pair, and
+  summ / items[].price are currency strings, not numbers
 + autoProlongCalc / autoProlongEnable / autoProlongDisable (+ ...Resident variants)
   for autoprolong/{calc,enable,disable}/{type}
 + X-Fingerprint on order/make: Config(key, baseUri, fingerprint), setFingerprint(),
