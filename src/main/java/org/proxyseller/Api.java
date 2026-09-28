@@ -1735,7 +1735,7 @@ public class Api {
 
     /**
      * Whether the type is renewed only as whole orders, selected by {@code orderIds}, rather than
-     * per proxy by {@code ipIds}/{@code ips}: true for {@code ipv6}, {@code mix} and
+     * per proxy by {@code ids}/{@code ips}: true for {@code ipv6}, {@code mix} and
      * {@code mix_isp}.
      *
      * @param type proxy type, in any case and with {@code -} or a space instead of {@code _}
@@ -1796,13 +1796,13 @@ public class Api {
      *   <li>a value with a dot or a colon is an address and goes to {@code ips}, whatever the
      *       type;</li>
      *   <li>any other value is an id: {@code orderIds} for ipv6/mix/mix_isp, which are renewed
-     *       only as whole orders, {@code ipIds} for every other type.</li>
+     *       only as whole orders, {@code ids} for every other type.</li>
      * </ul>
      * A field that would stay empty is left unset, so no empty key reaches the payload.
      *
      * <p>A list that mixes proxy ids and addresses for a per-proxy type (ipv4/isp/mobile) is
-     * rejected: when both {@code ipIds} and {@code ips} arrive, the server renews by
-     * {@code ipIds} and ignores {@code ips}, so the addresses would silently drop out of a paid
+     * rejected: when both {@code ids} and {@code ips} arrive, the server renews by
+     * {@code ids} and ignores {@code ips}, so the addresses would silently drop out of a paid
      * renewal. For ipv6/mix/mix_isp a mixed list is routed as is and the server rejects the
      * address part itself. Resident is left to {@code prepareAutoProlong}, which rejects any
      * selection there with a message of its own.
@@ -1818,7 +1818,7 @@ public class Api {
         List<String> ids = split.get(1);
         if (!ips.isEmpty() && !ids.isEmpty() && !isOrderProlongType(type) && !isResidentType(type)) {
             throw new IllegalArgumentException(MIXED_SELECTION_MESSAGE + " (" + normalizeProxyType(type)
-                    + ": when both arrive, the server renews by ipIds and ignores ips)");
+                    + ": when both arrive, the server renews by ids and ignores ips)");
         }
         if (!ips.isEmpty()) {
             prolongOptions.ips = ips;
@@ -1827,7 +1827,7 @@ public class Api {
             if (isOrderProlongType(type)) {
                 prolongOptions.orderIds = ids;
             } else {
-                prolongOptions.ipIds = ids;
+                prolongOptions.ids = ids;
             }
         }
     }
@@ -1863,11 +1863,11 @@ public class Api {
      * </ul>
      *
      * <p>Each value is routed by its shape and by the type: a value with a dot or a colon goes
-     * out as {@code ips}, any other value as {@code ipIds} (ipv4/isp/mobile) or {@code orderIds}
+     * out as {@code ips}, any other value as {@code ids} (ipv4/isp/mobile) or {@code orderIds}
      * (ipv6/mix/mix_isp). Blank values are dropped and an empty field is not sent.
      *
-     * <p>For ipv4/isp/mobile a list holds either ids or addresses, not both: when {@code ipIds}
-     * and {@code ips} arrive together, the server renews by {@code ipIds} and ignores the
+     * <p>For ipv4/isp/mobile a list holds either ids or addresses, not both: when {@code ids}
+     * and {@code ips} arrive together, the server renews by {@code ids} and ignores the
      * addresses, so a mixed list is rejected before anything is sent. For ipv6/mix/mix_isp an
      * address still goes out as {@code ips} and is rejected by the server
      * ({@code [ips] is not applicable for ipv6: prolong by [orderIds]}), and an order that is
@@ -2010,7 +2010,7 @@ public class Api {
      *
      * <p>Nothing is changed and nothing is charged — the call answers what automatic extension
      * will cost and <b>when</b> it will be taken. Selection and reference fields are the same as
-     * {@code prolong/calc} — {@code ipIds} or {@code ips} for ipv4/isp/mobile, {@code orderIds}
+     * {@code prolong/calc} — {@code ids} or {@code ips} for ipv4/isp/mobile, {@code orderIds}
      * for ipv6/mix/mix_isp, no selection at all for resident — plus {@code subscriptionId} and
      * {@code tarifId} ({@link AutoProlongOptions}). Any selection sent with {@code resident} is
      * rejected locally: automatic extension applies to the whole package there.
@@ -2067,7 +2067,7 @@ public class Api {
     /**
      * Calculate the upcoming automatic extension charge of the resident package.
      *
-     * <p>The unit here is the package, not addresses: no {@code ipIds}/{@code ips}/{@code orderIds}
+     * <p>The unit here is the package, not addresses: no {@code ids}/{@code ips}/{@code orderIds}
      * and no {@code periodId}. The answer carries {@code quantity: 1}, the tariff's own period in
      * {@code days} and a null {@code chargeDate} — a resident package renews on expiry OR on
      * traffic exhaustion, so no single date describes it; read {@code dateEnd} instead.
@@ -2104,11 +2104,11 @@ public class Api {
      * {@code paddle_subscription} are accepted, and {@code paddle_subscription} additionally
      * needs {@link AutoProlongOptions#subscriptionId}.
      *
-     * <p>Returned fields: {@code warning}, {@code autoProlong}, {@code quantity}, {@code ipIds[]}
+     * <p>Returned fields: {@code warning}, {@code autoProlong}, {@code quantity}, {@code ids[]}
      * (the proxies actually affected, as {@code id} of {@code proxy/list}), {@code orderIds[]}
      * (their orders), {@code days}, {@code paymentId}, {@code chargeDate} and {@code dateEnd}.
      * They are not an echo of the request: for ipv6/mix/mix_isp the whole order is switched at
-     * once, so {@code quantity}/{@code ipIds} cover every active proxy of the orders sent.
+     * once, so {@code quantity}/{@code ids} cover every active proxy of the orders sent.
      *
      * @param type               ipv4, ipv6, mobile, isp, mix, mix_isp or resident
      * @param autoProlongOptions selection, period and payment system
@@ -2148,7 +2148,7 @@ public class Api {
      *
      * <p>Replaces the removed {@code resident/autorenew/enable}. The body is the package-shaped
      * one — a payment system and nothing else — and the answer reports {@code quantity: 1} with
-     * empty {@code ipIds} and {@code orderIds}.
+     * empty {@code ids} and {@code orderIds}.
      *
      * @param tarifId The tariff currently on the package, or null.
      * @return The new automatic-extension state.
@@ -2176,7 +2176,7 @@ public class Api {
      * <p>Neither the period nor the payment system is required here — only the selection. Both
      * are cleared, so a later {@link #autoProlongEnable(String, AutoProlongOptions)} has to send
      * them again; in the answer {@code days}, {@code paymentId} and {@code chargeDate} are null
-     * while {@code dateEnd} still shows how long the proxies keep working. {@code ipIds[]} and
+     * while {@code dateEnd} still shows how long the proxies keep working. {@code ids[]} and
      * {@code orderIds[]} report what was actually switched off, as on enable.
      *
      * @param type               ipv4, ipv6, mobile, isp, mix, mix_isp or resident
@@ -2234,13 +2234,13 @@ public class Api {
         return map;
     }
 
-    /** Поля выборки продления: прокси (ipIds, ips) и заказы (orderIds). */
+    /** Поля выборки продления: прокси (ids, ips) и заказы (orderIds). */
     private static final List<String> PROLONG_SELECTION_KEYS =
-            Collections.unmodifiableList(Arrays.asList("ipIds", "ips", "orderIds"));
+            Collections.unmodifiableList(Arrays.asList("ids", "ips", "orderIds"));
 
     /**
      * Резидентка продлевается пакетом целиком, выборки у неё нет вовсе. Любую выборку — список,
-     * ipIds, ips или orderIds — отбиваем локально и НЕ выбрасываем молча: disable, адресованный
+     * ids, ips или orderIds — отбиваем локально и НЕ выбрасываем молча: disable, адресованный
      * нескольким адресам, иначе выключил бы автопродление всего пакета. Пустые значения выборкой
      * не считаются: они выбрасываются на всех путях одинаково.
      *

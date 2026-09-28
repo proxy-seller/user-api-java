@@ -11,14 +11,14 @@ import java.util.Map;
  *
  * <p>Which selection field to fill depends on the proxy type in the path:
  * <ul>
- *   <li>{@code ipv4}, {@code isp} and {@code mobile} are renewed per proxy — set {@link #ipIds}
+ *   <li>{@code ipv4}, {@code isp} and {@code mobile} are renewed per proxy — set {@link #ids}
  *       or {@link #ips};</li>
  *   <li>{@code ipv6}, {@code mix} and {@code mix_isp} are renewed only as whole orders — set
- *       {@link #orderIds}.</li>
+ *       {@link #orderIds} instead of {@code ids}.</li>
  * </ul>
  * A field of the other kind is rejected with an error naming it, e.g.
- * {@code [ipIds] is not applicable for ipv6: prolong by [orderIds]} or
- * {@code [orderIds] is not applicable for ipv4: prolong by [ipIds]}.
+ * {@code [ids] is not applicable for ipv6: prolong by [orderIds]} or
+ * {@code [orderIds] is not applicable for ipv4: prolong by [ids]}.
  *
  * <p>Blank values are dropped from the selection collections, and a collection left empty is not
  * sent at all.
@@ -31,23 +31,25 @@ import java.util.Map;
 public class ProlongOptions {
     /**
      * {@code ipv4}, {@code isp}, {@code mobile}: ids of the proxies to renew — the {@code id} field
-     * of {@code proxy/list}. If both {@code ipIds} and {@link #ips} are set, the server uses
-     * {@code ipIds} and ignores {@code ips}.
+     * of {@code proxy/list}. If both {@code ids} and {@link #ips} are set, the server uses
+     * {@code ids} and ignores {@code ips}. Not accepted for ipv6/mix/mix_isp, which take
+     * {@link #orderIds} instead.
      */
-    public Collection<String> ipIds;
+    public Collection<String> ids;
     /**
      * {@code ipv4}, {@code isp}, {@code mobile}: the addresses to renew instead of their ids,
      * exactly as {@code proxy/list} returns them — the plain {@code ip} ({@code 1.2.3.4}) for
      * ipv4/isp, {@code ip:port_http:port_socks} for mobile. Ignored by the server when
-     * {@link #ipIds} is set as well.
+     * {@link #ids} is set as well.
      */
     public Collection<String> ips;
     /**
-     * {@code ipv6}, {@code mix}, {@code mix_isp}: ids of the orders to renew — the
-     * {@code order_id} field of {@code proxy/list} or {@code order/list}. Every active proxy of
-     * that type in those orders is renewed; for mix/mix_isp, the mix packages of those orders.
-     * If any of the orders is not yours or has no active proxy of that type, the whole request
-     * fails with {@code Incorrect orderIds} (code 29) and nothing is renewed.
+     * {@code ipv6}, {@code mix}, {@code mix_isp}: ids of the orders to renew, instead of
+     * {@link #ids} — the {@code order_id} field of {@code proxy/list} or {@code order/list}.
+     * Every active proxy of that type in those orders is renewed; for mix/mix_isp, the mix
+     * packages of those orders. If any of the orders is not yours or has no active proxy of that
+     * type, the whole request fails with {@code Incorrect orderIds} (code 29) and nothing is
+     * renewed.
      */
     public Collection<String> orderIds;
     public String coupon;
@@ -62,7 +64,7 @@ public class ProlongOptions {
 
     public Map<Object, Object> toMap() {
         LinkedHashMap<Object, Object> map = new LinkedHashMap<>();
-        putSelection(map, "ipIds", ipIds);
+        putSelection(map, "ids", ids);
         putSelection(map, "ips", ips);
         putSelection(map, "orderIds", orderIds);
         put(map, "coupon", coupon);
@@ -91,8 +93,8 @@ public class ProlongOptions {
     }
 
     /**
-     * Пустую выборку не шлём вовсе. Пустой ipIds рядом с ips выглядел бы для сервера как «ipIds
-     * заданы» — а при обоих полях он берёт ipIds и адреса не смотрит. Пустые и null-значения
+     * Пустую выборку не шлём вовсе. Пустой ids рядом с ips выглядел бы для сервера как «ids
+     * заданы» — а при обоих полях он берёт ids и адреса не смотрит. Пустые и null-значения
      * внутри коллекции выбрасываем по той же причине: список из одних пробелов — та же пустота.
      */
     private static void putSelection(Map<Object, Object> map, String key, Collection<String> values) {

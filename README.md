@@ -12,11 +12,12 @@ Prebuilt jars for v2 live in
 `proxy-seller-user-api-2.0-standalone.jar` (fat jar, Gson included), plus the
 sources and javadoc jars. They are produced by `./gradlew build_standalone`.
 
-> ⚠️ **The jars in `dist/` are behind the sources.** They predate `ProlongOptions.ipIds`,
-> `ips` and `orderIds`, `X-Fingerprint`, `orderList()` and the `autoprolong/*` methods, and their
-> renewal methods still send the removed `ids` field, which the server no longer reads — renewing
-> through them does not work. Until they are regenerated (`./gradlew build_standalone`), build
-> from source — the examples in this README assume the current sources.
+> ⚠️ **The jars in `dist/` are behind the sources.** They predate `ProlongOptions.ips` and
+> `ProlongOptions.orderIds`, `X-Fingerprint`, `orderList()` and the `autoprolong/*` methods. Their
+> renewal methods send every value as `ids`: that still renews ipv4, isp and mobile by proxy id,
+> but ipv6, mix and mix_isp are renewed by `orderIds`, which those jars cannot send. Until they
+> are regenerated (`./gradlew build_standalone`), build from source — the examples in this README
+> assume the current sources.
 
 Requires **JDK 17+**. **Android is not supported** — see [Platform support](#platform-support).
 
@@ -284,11 +285,12 @@ What you pass follows the proxy type, and every value comes straight out of `pro
 
 | type | what to pass | sent as |
 |---|---|---|
-| `ipv4`, `isp` | the `ip` field (`1.2.3.4`), or the proxy `id` | `ips` / `ipIds` |
-| `mobile` | `ip` + `:` + `port_http` + `:` + `port_socks`, or the proxy `id` | `ips` / `ipIds` |
-| `ipv6`, `mix`, `mix_isp` | the `order_id` field — `orderList()` returns it too | `orderIds` |
+| `ipv4`, `isp` | the `ip` field (`1.2.3.4`), or the proxy `id` | `ips` / `ids` |
+| `mobile` | `ip` + `:` + `port_http` + `:` + `port_socks`, or the proxy `id` | `ips` / `ids` |
+| `ipv6`, `mix`, `mix_isp` | the `order_id` field — `orderList()` returns it too | `orderIds`, instead of `ids` |
 
-ipv4, isp and mobile renew per proxy, by the addresses themselves — no ids to look up:
+ipv4, isp and mobile renew per proxy: by `ids` — the proxy `id`, the same field as before — or
+by `ips`, the addresses themselves, with no ids to look up:
 
 ```java
 Map list = (Map) api.proxyList("ipv4");
@@ -307,12 +309,12 @@ api.prolongMake("ipv4", ips, "1m", null);   // deducts money
 (`"1m"`), same fallback as `order/*`, and the fourth argument is a coupon.
 
 The list overloads route every value by its shape and by the type. A value with a dot or a colon
-is an address and goes out as `ips`; any other value is an id — `ipIds` for ipv4, isp and mobile,
+is an address and goes out as `ips`; any other value is an id — `ids` for ipv4, isp and mobile,
 `orderIds` for ipv6, mix and mix_isp. Blank values are dropped, and an empty field is not sent at
 all.
 
 For ipv4, isp and mobile pass either ids or addresses in one call, not both. When a request
-carries both `ipIds` and `ips`, the server renews by `ipIds` and ignores the addresses, so they
+carries both `ids` and `ips`, the server renews by `ids` and ignores the addresses, so they
 would silently drop out of a paid renewal. The SDK therefore throws an `IllegalArgumentException`
 before anything is sent:
 
@@ -325,9 +327,9 @@ and the server rejects the address part itself (see below).
 
 ### ipv6, mix and mix_isp are renewed as whole orders by `orderIds`
 
-These products are sold and renewed only as whole orders, so they are selected by `order_id`, not
-by address. Every active proxy of that type in the given orders is renewed — for `mix` and
-`mix_isp`, the mix packages of those orders:
+These products are sold and renewed only as whole orders, so they are selected by `orderIds` — the
+`order_id` field — instead of `ids`, not by address. Every active proxy of that type in the given
+orders is renewed — for `mix` and `mix_isp`, the mix packages of those orders:
 
 ```java
 Set<String> orders = new LinkedHashSet<>();
@@ -341,10 +343,11 @@ api.prolongMake("ipv6", new ArrayList<>(orders), "1m", null);
 
 If any of the orders is not yours or has no active proxy of that type — or no order is given at
 all — the whole request fails with `Incorrect orderIds` (code 29) and nothing is renewed. A
-selection field of the other kind is an error too, and the message names the field: addresses
-sent for these types get `[ips] is not applicable for ipv6: prolong by [orderIds]` (proxy ids in
-`ipIds` get the same with `[ipIds]`), and `orderIds` sent for ipv4, isp or mobile gets
-`[orderIds] is not applicable for ipv4: prolong by [ipIds]`.
+selection field of the other kind is an error too (code 0), and the message names the field:
+proxy ids in `ids` sent for these types get
+`[ids] is not applicable for ipv6: prolong by [orderIds]`, addresses in `ips` get the same with
+`[ips]`, and `orderIds` sent for ipv4, isp or mobile gets
+`[orderIds] is not applicable for ipv4: prolong by [ids]`.
 
 ### What `prolongMake` returns
 
@@ -367,19 +370,19 @@ did not happen. The calculation, with the server's `warning`, is in `getResponse
 <details>
 <summary>The full payload: <code>ProlongOptions</code></summary>
 
-`ProlongOptions` sets every field directly, with no routing: `ipIds`, `ips`, `orderIds`,
+`ProlongOptions` sets every field directly, with no routing: `ids`, `ips`, `orderIds`,
 `coupon`, `periodId` / `periodCode` and a per-request `paymentId` / `paymentCode`.
 
 ```java
 ProlongOptions prolong = new ProlongOptions();
-prolong.orderIds = List.of("ORDER_ID");   // ipv6 / mix / mix_isp; ipv4 / isp / mobile take ipIds or ips
+prolong.orderIds = List.of("ORDER_ID");   // ipv6 / mix / mix_isp; ipv4 / isp / mobile take ids or ips
 prolong.periodId = "1m";
 prolong.paymentCode = "balance";          // this request only
 api.prolongMake("mix", prolong);
 ```
 
-Blank values are dropped and an empty collection is not sent. Set only one of `ipIds` and `ips`:
-this class sends what you set, and when both arrive the server uses `ipIds`.
+Blank values are dropped and an empty collection is not sent. Set only one of `ids` and `ips`:
+this class sends what you set, and when both arrive the server uses `ids`.
 
 </details>
 
@@ -387,12 +390,12 @@ this class sends what you set, and when both arrive the server uses `ipIds`.
 
 `prolong/make` charges you now. `autoprolong/*` only arms a charge that happens later, without
 you present — so it is a separate branch of the API, not a flag on `prolong`. The selection is
-the same as for renewal: `ipIds` or `ips` for ipv4, isp and mobile, `orderIds` for ipv6, mix and
+the same as for renewal: `ids` or `ips` for ipv4, isp and mobile, `orderIds` for ipv6, mix and
 mix_isp (see [Renewing proxies](#renewing-proxies)).
 
 ```java
 AutoProlongOptions auto = new AutoProlongOptions();
-auto.ips = List.of("1.2.3.4");                  // or auto.ipIds = List.of("PROXY_ID")
+auto.ips = List.of("1.2.3.4");                  // or auto.ids = List.of("PROXY_ID")
 auto.periodId = "1m";
 auto.paymentId = "balance";                     // mandatory here
 
@@ -425,21 +428,23 @@ api.autoProlongEnableResident();
 api.autoProlongDisableResident();
 ```
 
-Any selection with `resident` — a non-empty list, `ipIds`, `ips` or `orderIds` — throws an
+Any selection with `resident` — a non-empty list, `ids`, `ips` or `orderIds` — throws an
 `IllegalArgumentException` before anything is sent:
 
 ```
 resident auto-prolong applies to the whole package: do not pass proxy or order ids
 ```
 
-The selection is never dropped silently: a disable meant for a few addresses would otherwise
-switch off automatic renewal of the whole package.
+The server refuses such a body too: any of `ids`, `ips` and `orderIds` gets
+`[ids] is not applicable for resident: auto-prolong applies to the whole package`. The selection
+is never dropped silently: a disable meant for a few addresses would otherwise switch off
+automatic renewal of the whole package.
 
 Three things about the answers are worth knowing before you parse them:
 
-* **`ipIds` is not an echo.** `enable` and `disable` answer `ipIds[]` — the proxies actually
+* **`ids` is not an echo.** `enable` and `disable` answer `ids[]` — the proxies actually
   affected — and `orderIds[]`, their orders (both empty for resident). For ipv6, mix and mix_isp
-  the whole order is switched at once, so `quantity` and `ipIds` cover every active proxy of the
+  the whole order is switched at once, so `quantity` and `ids` cover every active proxy of the
   orders you sent.
 * **Not enough money is not an exception.** `calc` answers `status: "error"` with a *filled*
   `data` block and an empty `errors[]` — the same shape `prolong/calc` uses. Read `warning`.
@@ -903,22 +908,22 @@ breaks the most code.
   Config.setRateLimitEnabled(false) restores the previous behaviour
 + Config.setRateLimitEnabled / setRequestsPerMinute / setWriteIntervalMillis /
   setMoneyIntervalMillis / setMaxRetries
-! ProlongOptions.ids renamed to ipIds; the server no longer reads ids
 ! ProlongOptions.orderSeparatorIds / orderSeparatorId removed, the server no longer reads
   them. ipv6, mix and mix_isp are renewed as whole orders through the new
-  ProlongOptions.orderIds (order_id from proxyList / orderList)
-! ipIds / ips select ipv4, isp and mobile only; ipv6 is no longer renewed by host:port.
-  A selection field of the other kind is rejected by the server, e.g.
-  [ipIds] is not applicable for ipv6: prolong by [orderIds]
+  ProlongOptions.orderIds (order_id from proxyList / orderList) instead of ids
+! ids / ips select ipv4, isp and mobile only: ids as before, or the addresses in ips.
+  ipv6 is no longer renewed by host:port. A selection field of the other kind is rejected
+  by the server, e.g. [ids] is not applicable for ipv6: prolong by [orderIds]
 ! the List overloads of prolongCalc / prolongMake / autoProlongCalc / autoProlongEnable /
   autoProlongDisable route by type: an id goes out as orderIds for ipv6 / mix / mix_isp
-  and as ipIds for the other types, an address as ips
-! autoprolong/enable and autoprolong/disable answer ipIds[] instead of ids[], plus orderIds[]
+  and as ids for the other types, an address as ips
++ autoprolong/enable and autoprolong/disable answer orderIds[] — the orders of the affected
+  proxies — next to ids[]
 ! a List overload that mixes proxy ids and addresses for ipv4 / isp / mobile now throws
-  IllegalArgumentException: the server renews by ipIds and ignores ips when both arrive, so
+  IllegalArgumentException: the server renews by ids and ignores ips when both arrive, so
   the addresses would silently drop out of a paid renewal
 ! autoprolong with type resident throws IllegalArgumentException on any selection (a
-  non-empty list, ipIds, ips or orderIds): automatic renewal there covers the whole package,
+  non-empty list, ids, ips or orderIds): automatic renewal there covers the whole package,
   and a selection is never dropped silently
 ! X-Fingerprint is optional: orderMakeResident / orderMakeScraper and orderMake no longer
   throw locally when it is missing, as 2.0.1 did — the header is sent only when set, and the

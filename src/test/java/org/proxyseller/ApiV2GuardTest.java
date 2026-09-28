@@ -185,15 +185,15 @@ class ApiV2GuardTest {
     // --- продление: поле выборки зависит от ТИПА ------------------------------------
 
     /**
-     * ipv4 / isp / mobile продлеваются по отдельным прокси: id прокси уходит в ipIds.
+     * ipv4 / isp / mobile продлеваются по отдельным прокси: id прокси уходит в ids.
      * ipv6 / mix / mix_isp — только целым заказом: всё, что не адрес, — это order_id, и id прокси
-     * в ipIds сервер для них отбивает ({@code [ipIds] is not applicable for ipv6 ...}).
+     * в ids сервер для них отбивает ({@code [ids] is not applicable for ipv6 ...}).
      */
     @Test
-    void proxyIdOfPerProxyTypeIsRoutedIntoIpIds() {
+    void proxyIdOfPerProxyTypeIsRoutedIntoIds() {
         for (String type : Arrays.asList("ipv4", "isp", "mobile")) {
             ProlongOptions options = routed(type, "68b1f0c4e13a4c0f1a2b3c4d");
-            assertEquals(List.of("68b1f0c4e13a4c0f1a2b3c4d"), options.ipIds, type);
+            assertEquals(List.of("68b1f0c4e13a4c0f1a2b3c4d"), options.ids, type);
             assertNull(options.orderIds, type);
             assertNull(options.ips, type);
         }
@@ -204,7 +204,7 @@ class ApiV2GuardTest {
         for (String type : Arrays.asList("ipv6", "mix", "mix_isp")) {
             ProlongOptions options = routed(type, "6a248de4717805635cf6057d");
             assertEquals(List.of("6a248de4717805635cf6057d"), options.orderIds, type);
-            assertNull(options.ipIds, type);
+            assertNull(options.ids, type);
             assertNull(options.ips, type);
         }
     }
@@ -217,7 +217,7 @@ class ApiV2GuardTest {
                     routed(type, "6a248de4717805635cf6057d").orderIds, type);
         }
         assertEquals(List.of("68b1f0c4e13a4c0f1a2b3c4d"),
-                routed(" IPv4 ", "68b1f0c4e13a4c0f1a2b3c4d").ipIds);
+                routed(" IPv4 ", "68b1f0c4e13a4c0f1a2b3c4d").ids);
         assertEquals("mix_isp", Api.normalizeProxyType(" Mix-ISP "));
         assertEquals("", Api.normalizeProxyType(null));
     }
@@ -228,13 +228,13 @@ class ApiV2GuardTest {
         for (String type : Arrays.asList("ipv4", "isp", "mobile", "ipv6", "mix", "mix_isp")) {
             ProlongOptions options = routed(type, "1.2.3.4", "10.0.0.1:8000:9000");
             assertEquals(Arrays.asList("1.2.3.4", "10.0.0.1:8000:9000"), options.ips, type);
-            assertNull(options.ipIds, type);
+            assertNull(options.ids, type);
             assertNull(options.orderIds, type);
         }
     }
 
     /**
-     * ipv4 / isp / mobile: при ipIds сервер адреса из ips не смотрит вовсе, так что смешанный
+     * ipv4 / isp / mobile: при ids сервер адреса из ips не смотрит вовсе, так что смешанный
      * список молча продлил бы только часть оплаченного. Такой список отбивается до запроса.
      */
     @Test
@@ -245,6 +245,7 @@ class ApiV2GuardTest {
             assertTrue(e.getMessage().startsWith(
                     "Mixing proxy ids and addresses in one call is not supported: pass either ids or addresses"),
                     e.getMessage());
+            assertTrue(e.getMessage().contains("the server renews by ids and ignores ips"), e.getMessage());
         }
     }
 
@@ -273,7 +274,7 @@ class ApiV2GuardTest {
             ProlongOptions options = routed(type, "1.2.3.4", "6a248de4717805635cf6057d");
             assertEquals(List.of("1.2.3.4"), options.ips, type);
             assertEquals(List.of("6a248de4717805635cf6057d"), options.orderIds, type);
-            assertNull(options.ipIds, type);
+            assertNull(options.ids, type);
         }
     }
 
@@ -291,13 +292,13 @@ class ApiV2GuardTest {
         calls.add(() -> local.autoProlongDisable("Resident",
                 Arrays.asList("1.2.3.4", "68b1f0c4e13a4c0f1a2b3c4d")));
 
-        AutoProlongOptions byIpIds = new AutoProlongOptions();
-        byIpIds.ipIds = List.of("68b1f0c4e13a4c0f1a2b3c4d");
+        AutoProlongOptions byIds = new AutoProlongOptions();
+        byIds.ids = List.of("68b1f0c4e13a4c0f1a2b3c4d");
         AutoProlongOptions byIps = new AutoProlongOptions();
         byIps.ips = List.of("1.2.3.4");
         AutoProlongOptions byOrders = new AutoProlongOptions();
         byOrders.orderIds = List.of("6a248de4717805635cf6057d");
-        for (AutoProlongOptions options : Arrays.asList(byIpIds, byIps, byOrders)) {
+        for (AutoProlongOptions options : Arrays.asList(byIds, byIps, byOrders)) {
             calls.add(() -> local.autoProlongCalc("resident", options));
             calls.add(() -> local.autoProlongEnable("resident", options));
             calls.add(() -> local.autoProlongDisable("resident", options));
@@ -320,7 +321,7 @@ class ApiV2GuardTest {
         Api.assertNoResidentSelection("resident", packageShaped.toMap());
 
         AutoProlongOptions blanks = new AutoProlongOptions();
-        blanks.ipIds = Arrays.asList(" ", null);
+        blanks.ids = Arrays.asList(" ", null);
         Api.assertNoResidentSelection("resident", blanks.toMap());
 
         Api.assertNoResidentSelection("ipv4", routed("ipv4", "1.2.3.4").toMap());
@@ -328,29 +329,31 @@ class ApiV2GuardTest {
     }
 
     /**
-     * Удалённых полей выборки нет ни в ProlongOptions, ни в AutoProlongOptions, а сырого Map-пути
-     * у prolong/* и autoprolong/* нет вовсе — старое имя поля не доедет до сервера ни одним путём.
+     * Удалённых полей выборки orderSeparatorIds / orderSeparatorId (их заменил orderIds) нет ни в
+     * ProlongOptions, ни в AutoProlongOptions, а сырого Map-пути у prolong/* и autoprolong/* нет
+     * вовсе — старое имя поля не доедет до сервера ни одним путём. ids сюда не входит: это рабочее
+     * поле выборки ipv4 / isp / mobile.
      */
     @Test
     void removedSelectionFieldsDoNotExist() {
         for (Class<?> options : Arrays.asList(ProlongOptions.class, AutoProlongOptions.class)) {
-            for (String removed : Arrays.asList("ids", "orderSeparatorIds", "orderSeparatorId")) {
+            for (String removed : Arrays.asList("orderSeparatorIds", "orderSeparatorId")) {
                 assertThrows(NoSuchFieldException.class, () -> options.getField(removed),
-                        options.getSimpleName() + "." + removed);
+                        options.getSimpleName() + "." + removed + " was removed, use orderIds");
             }
         }
     }
 
     /**
-     * Пустые значения выбрасываются, пустой ключ не уходит вовсе: при заданном ipIds сервер
-     * адреса из ips не смотрит, так что пустой ipIds рядом с ips сорвал бы продление.
+     * Пустые значения выбрасываются, пустой ключ не уходит вовсе: при заданном ids сервер
+     * адреса из ips не смотрит, так что пустой ids рядом с ips сорвал бы продление.
      * Резидентка без выборки остаётся без выборки.
      */
     @Test
     void blanksAreDroppedAndNoEmptyKeyIsSent() {
         Map<Object, Object> payload = routed("ipv4", "1.2.3.4", "   ", "", null).toMap();
         assertEquals(List.of("1.2.3.4"), payload.get("ips"));
-        assertFalse(payload.containsKey("ipIds"));
+        assertFalse(payload.containsKey("ids"));
         assertFalse(payload.containsKey("orderIds"));
 
         for (String type : Arrays.asList("ipv4", "mobile", "ipv6", "mix_isp", "resident")) {
@@ -365,7 +368,7 @@ class ApiV2GuardTest {
     @Test
     void prolongOptionsNeverSendRemovedFields() {
         ProlongOptions options = new ProlongOptions();
-        options.ipIds = List.of("68b1f0c4e13a4c0f1a2b3c4d");
+        options.ids = List.of("68b1f0c4e13a4c0f1a2b3c4d");
         options.ips = List.of("1.2.3.4");
         options.orderIds = List.of("6a248de4717805635cf6057d");
         options.coupon = "SALE10";
@@ -379,12 +382,13 @@ class ApiV2GuardTest {
         auto.subscriptionId = "sub_01hxyz";
 
         for (Map<Object, Object> payload : Arrays.asList(options.toMap(), auto.toMap())) {
-            for (String removed : Arrays.asList("ids", "orderSeparatorIds", "orderSeparatorId")) {
-                assertFalse(payload.containsKey(removed), removed + " is no longer read by the server");
+            for (String removed : Arrays.asList("orderSeparatorIds", "orderSeparatorId")) {
+                assertFalse(payload.containsKey(removed),
+                        removed + " is no longer read by the server, use orderIds");
             }
         }
         Map<Object, Object> payload = options.toMap();
-        assertEquals(List.of("68b1f0c4e13a4c0f1a2b3c4d"), payload.get("ipIds"));
+        assertEquals(List.of("68b1f0c4e13a4c0f1a2b3c4d"), payload.get("ids"));
         assertEquals(List.of("1.2.3.4"), payload.get("ips"));
         assertEquals(List.of("6a248de4717805635cf6057d"), payload.get("orderIds"));
         assertEquals(List.of("6a248de4717805635cf6057d"), auto.toMap().get("orderIds"));
@@ -393,15 +397,45 @@ class ApiV2GuardTest {
     @Test
     void prolongOptionsDoNotSendEmptyCollections() {
         ProlongOptions options = new ProlongOptions();
-        options.ipIds = new ArrayList<>();
+        options.ids = new ArrayList<>();
         options.ips = List.of("1.2.3.4");
         options.orderIds = Arrays.asList(" ", null);
         options.periodId = "1m";
         Map<Object, Object> payload = options.toMap();
         assertEquals(List.of("1.2.3.4"), payload.get("ips"));
-        assertFalse(payload.containsKey("ipIds"), "an empty ipIds next to ips would win over the addresses");
+        assertFalse(payload.containsKey("ids"), "an empty ids next to ips would win over the addresses");
         assertFalse(payload.containsKey("orderIds"));
         assertEquals("1m", payload.get("periodId"));
+    }
+
+    /**
+     * Списочные перегрузки доводят выборку до тела запроса: id прокси ipv4 / isp / mobile уходит
+     * в ids, order_id ipv6 / mix / mix_isp — в orderIds, и поля другого вида в теле нет.
+     */
+    @Test
+    void listOverloadsSendTheSelectionFieldOfTheType() throws Exception {
+        CapturingApi local = new CapturingApi(new Config("TEST_KEY"));
+        local.setPaymentCode("balance");
+        List<String> proxyIds = List.of("68b1f0c4e13a4c0f1a2b3c4d");
+        List<String> orders = List.of("6a248de4717805635cf6057d");
+
+        local.prolongCalc("ipv4", proxyIds, "1m", null);
+        assertEquals("prolong/calc/ipv4", local.lastUri);
+        assertEquals(proxyIds, local.lastOptions.getJson().get("ids"));
+        assertFalse(local.lastOptions.getJson().containsKey("orderIds"));
+
+        local.autoProlongEnable("mobile", proxyIds, "1m");
+        assertEquals("autoprolong/enable/mobile", local.lastUri);
+        assertEquals(proxyIds, local.lastOptions.getJson().get("ids"));
+
+        local.autoProlongDisable("isp", proxyIds);
+        assertEquals("autoprolong/disable/isp", local.lastUri);
+        assertEquals(proxyIds, local.lastOptions.getJson().get("ids"));
+
+        local.prolongCalc("mix_isp", orders, "1m", null);
+        assertEquals("prolong/calc/mix_isp", local.lastUri);
+        assertEquals(orders, local.lastOptions.getJson().get("orderIds"));
+        assertFalse(local.lastOptions.getJson().containsKey("ids"));
     }
 
     // --- prolong/make: успех — это продлённые заказы ---------------------------------
