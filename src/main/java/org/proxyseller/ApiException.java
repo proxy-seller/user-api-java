@@ -72,6 +72,13 @@ public class ApiException extends Exception {
         return customData;
     }
 
+    /**
+     * HTTP status of the response, usually 200 — business failures travel inside the envelope.
+     * {@code 429} means the edge in front of the API kept rejecting the request after the
+     * client's retries ({@link Config#setMaxRetries(int)}).
+     *
+     * @return the HTTP status, or null when no response arrived
+     */
     public Integer getHttpStatus() {
         return httpStatus;
     }
@@ -106,9 +113,11 @@ public class ApiException extends Exception {
 
     /**
      * True when the failure is the fixed access-error triple: a wrong api key,
-     * an IP outside the allowlist, or an exceeded rate limit. The server sends
-     * it with HTTP 200 (there is no HTTP 429 in Client API v2), so the status
-     * code cannot be used for the check.
+     * an IP outside the allowlist, or an exceeded rate limit. The API sends
+     * it with HTTP 200 (its own rate limit is never an HTTP 429 — a 429 comes
+     * only from the edge in front of the API), so the status code cannot be
+     * used for the check. The client never retries this triple: it cannot be
+     * told apart from a wrong key or IP.
      *
      * @return whether the response is the access-error triple
      */

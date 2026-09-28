@@ -26,8 +26,7 @@ public class RequestOptions {
 
     /**
      * Дополнительные заголовки запроса. Раньше в запрос были жёстко зашиты только
-     * Accept/Content-Type, и послать {@code X-Fingerprint} было нечем — а без него
-     * {@code order/make} не создаёт резидентские и скраперные заказы вовсе.
+     * Accept/Content-Type, и послать, например, {@code X-Fingerprint} было нечем.
      *
      * @return изменяемая карта заголовков, по умолчанию пустая
      */

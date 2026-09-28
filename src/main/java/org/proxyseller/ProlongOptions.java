@@ -1,11 +1,27 @@
 package org.proxyseller;
 
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 
 /**
  * Full payload accepted by {@code prolong/calc} and {@code prolong/make}.
+ *
+ * <p>Which selection field to fill depends on the proxy type in the path:
+ * <ul>
+ *   <li>{@code ipv4}, {@code isp} and {@code mobile} are renewed per proxy — set {@link #ipIds}
+ *       or {@link #ips};</li>
+ *   <li>{@code ipv6}, {@code mix} and {@code mix_isp} are renewed only as whole orders — set
+ *       {@link #orderIds}.</li>
+ * </ul>
+ * A field of the other kind is rejected with an error naming it, e.g.
+ * {@code [ipIds] is not applicable for ipv6: prolong by [orderIds]} or
+ * {@code [orderIds] is not applicable for ipv4: prolong by [ipIds]}.
+ *
+ * <p>Blank values are dropped from the selection collections, and a collection left empty is not
+ * sent at all.
  *
  * <p>{@code periodId} and {@code paymentId} accept <b>an ObjectId or the matching code</b> — the
  * server falls back to a code lookup when the value is not a valid id and the paired {@code *Code}
@@ -13,24 +29,27 @@ import java.util.Map;
  * payload — for these two pairs the server does prefer the code.
  */
 public class ProlongOptions {
-    /** IP address ids to renew (ObjectId strings). */
-    public Collection<String> ids;
     /**
-     * The addresses themselves instead of ids — exactly as {@code proxy/list} returns them:
-     * {@code 1.2.3.4} for ipv4/isp/mix, {@code host:port} for ipv6,
-     * {@code ip:port_http:port_socks} for mobile. The server resolves them into ids
-     * ({@code ClientApiService.resolveProlongIpsToIds}). If both are set, the server uses
-     * {@code ids}.
-     *
-     * <p>For ipv6 the {@code ip} field already contains the gateway and its port
-     * ({@code 1.2.3.4:26000}) while {@code ip_only} holds the gateway alone — pass {@code ip}
-     * as-is, same as every other type.
+     * {@code ipv4}, {@code isp}, {@code mobile}: ids of the proxies to renew — the {@code id} field
+     * of {@code proxy/list}. If both {@code ipIds} and {@link #ips} are set, the server uses
+     * {@code ipIds} and ignores {@code ips}.
+     */
+    public Collection<String> ipIds;
+    /**
+     * {@code ipv4}, {@code isp}, {@code mobile}: the addresses to renew instead of their ids,
+     * exactly as {@code proxy/list} returns them — the plain {@code ip} ({@code 1.2.3.4}) for
+     * ipv4/isp, {@code ip:port_http:port_socks} for mobile. Ignored by the server when
+     * {@link #ipIds} is set as well.
      */
     public Collection<String> ips;
-    /** Order separator ids of a MIX order to renew (ObjectId strings). */
-    public Collection<String> orderSeparatorIds;
-    /** A single MIX order separator id (ObjectId string). */
-    public String orderSeparatorId;
+    /**
+     * {@code ipv6}, {@code mix}, {@code mix_isp}: ids of the orders to renew — the
+     * {@code order_id} field of {@code proxy/list} or {@code order/list}. Every active proxy of
+     * that type in those orders is renewed; for mix/mix_isp, the mix packages of those orders.
+     * If any of the orders is not yours or has no active proxy of that type, the whole request
+     * fails with {@code Incorrect orderIds} (code 29) and nothing is renewed.
+     */
+    public Collection<String> orderIds;
     public String coupon;
     /** Period ObjectId, or the period code ({@code 1m}); lower-cased server-side. */
     public String periodId;
@@ -43,18 +62,17 @@ public class ProlongOptions {
 
     public Map<Object, Object> toMap() {
         LinkedHashMap<Object, Object> map = new LinkedHashMap<>();
-        put(map, "ids", ids);
-        put(map, "ips", ips);
-        put(map, "orderSeparatorIds", orderSeparatorIds);
-        put(map, "orderSeparatorId", orderSeparatorId);
+        putSelection(map, "ipIds", ipIds);
+        putSelection(map, "ips", ips);
+        putSelection(map, "orderIds", orderIds);
         put(map, "coupon", coupon);
         put(map, "periodId", periodId);
         put(map, "periodCode", periodCode);
         put(map, "paymentId", paymentId);
         put(map, "paymentCode", paymentCode);
-        // Обе пары прольонга — из тех, где старше code (normalizeProlongReferenceCodes: ветка
-        // кода на парный id не смотрит). Пустая строка при этом кодом НЕ считается: сервер везде
-        // проходит значение через trimToNull, а прежняя проверка на != null стирала валидный id.
+        // Для обеих пар продления сервер предпочитает code: заданный code парный id не смотрит.
+        // Пустая строка при этом кодом НЕ считается: сервер обрезает пробелы и пустое значение
+        // считает незаданным, а прежняя проверка на != null стирала валидный id.
         preferCode(map, "periodId", periodCode);
         preferCode(map, "paymentId", paymentCode);
         return map;
@@ -69,6 +87,27 @@ public class ProlongOptions {
     private static void put(Map<Object, Object> map, String key, Object value) {
         if (value != null) {
             map.put(key, value);
+        }
+    }
+
+    /**
+     * Пустую выборку не шлём вовсе. Пустой ipIds рядом с ips выглядел бы для сервера как «ipIds
+     * заданы» — а при обоих полях он берёт ipIds и адреса не смотрит. Пустые и null-значения
+     * внутри коллекции выбрасываем по той же причине: список из одних пробелов — та же пустота.
+     */
+    private static void putSelection(Map<Object, Object> map, String key, Collection<String> values) {
+        if (values == null) {
+            return;
+        }
+        List<String> cleaned = new ArrayList<>();
+        for (Object value : values) {
+            String text = value == null ? "" : String.valueOf(value).trim();
+            if (!text.isEmpty()) {
+                cleaned.add(text);
+            }
+        }
+        if (!cleaned.isEmpty()) {
+            map.put(key, cleaned);
         }
     }
 }

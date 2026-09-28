@@ -58,8 +58,9 @@ public class OrderOptions {
      */
     public String rotationId;
     /**
-     * Legacy twin of {@link #rotationId}: the server does not resolve it, it only checks that the
-     * value is an integer and copies it into {@code rotationId}. Prefer {@link #rotationId}.
+     * Alias of {@link #rotationId}: it is not resolved as a code — the value must be an integer
+     * number of minutes, and it is used as {@code rotationId} while {@code rotationId} itself is
+     * empty. Prefer {@link #rotationId}.
      */
     public String rotationCode;
     /** Resident tariff ObjectId, or the tariff code (exact match). */
@@ -97,14 +98,14 @@ public class OrderOptions {
             put(map, "generateAuth", generateAuth);
         }
 
-        // Приоритет пары *Id / *Code на СЕРВЕРЕ не одинаков для всех семи полей
-        // (ClientApiService.normalizeOrderReferenceCodes). Старше code только у трёх:
-        // countryCode, periodCode, paymentCode — их ветка не смотрит на парный id вовсе.
+        // Приоритет пары *Id / *Code на СЕРВЕРЕ не одинаков для всех семи полей. Старше code
+        // только у трёх: countryCode, periodCode, paymentCode — заданный code парный id не
+        // смотрит вовсе.
         preferCode(map, "countryId", "countryCode", countryCode);
         preferCode(map, "periodId", "periodCode", periodCode);
         preferCode(map, "paymentId", "paymentCode", paymentCode);
         // А operatorCode / rotationCode / mixCode / tarifCode применяются, ТОЛЬКО когда парный
-        // *Id пуст (`if (code && !trimToNull(id))`). Раньше SDK и здесь стирал *Id — клиент,
+        // *Id пуст. Раньше SDK и здесь стирал *Id — клиент,
         // заполнивший обе половины, молча получал не тот пакет/оператора/ротацию/тариф, который
         // выбрал бы сервер. Отправляем обе половины как есть и даём серверу разрешить.
         return map;
@@ -117,9 +118,9 @@ public class OrderOptions {
     }
 
     /**
-     * Пустая строка — это НЕ заданный код: сервер везде проходит значение через trimToNull,
-     * так что {@code countryCode = ""} не стёр бы валидный countryId, а прежняя проверка на
-     * {@code != null} стирала.
+     * Пустая строка — это НЕ заданный код: пустые и пробельные значения сервер считает
+     * неотправленными, так что {@code countryCode = ""} не стёр бы валидный countryId, а прежняя
+     * проверка на {@code != null} стирала.
      */
     private static void preferCode(Map<Object, Object> map, String idKey, String codeKey, String code) {
         if (code != null && !code.trim().isEmpty()) {

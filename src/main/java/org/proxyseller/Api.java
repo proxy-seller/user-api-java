@@ -18,6 +18,7 @@ import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
@@ -28,10 +29,19 @@ import java.util.stream.Collectors;
  *
  * <p>The api key is a <b>path segment</b> ({@code https://proxy-seller.com/personal/api/v2/{apiKey}/...}),
  * not a header. Every response is the envelope {@code {status, data, errors}} and almost
- * always arrives with <b>HTTP 200</b> — business failures live in {@code errors}, and there
- * is no HTTP 429 for the rate limit. Failures surface here as {@link ApiException}; use
+ * always arrives with <b>HTTP 200</b> — business failures live in {@code errors}, and the
+ * API's own rate limit is not an HTTP 429 either. Failures surface here as {@link ApiException}; use
  * {@link ApiException#getErrors()} to read the whole array, because access failures come as
  * a fixed triple that only the array distinguishes.
+ *
+ * <p>Requests are <b>paced by default</b>, so a program that calls the api in a loop stays under
+ * its limits: at most {@link Config#getRequestsPerMinute()} request starts within any 60 seconds;
+ * write and money calls one at a time, {@link Config#getWriteIntervalMillis()} apart (money calls
+ * also {@link Config#getMoneyIntervalMillis()} apart); and an HTTP 429 from the edge in front of
+ * the API is retried after {@code Retry-After} up to {@link Config#getMaxRetries()} times. Waiting
+ * blocks the calling thread. The queue belongs to this instance — share one {@code Api} between
+ * threads rather than creating several for the same key. {@link Config#setRateLimitEnabled(boolean)}
+ * turns it off.
  *
  * <p>All ids are MongoDB ObjectId <b>strings</b>. Two exceptions: the resident list id, which
  * stayed numeric (see {@link #residentList()}), and {@code rotationId}, which is a rotation
@@ -59,14 +69,13 @@ public class Api {
     private static final Type MAP_TYPE = new TypeToken<Map<String, Object>>() { }.getType();
     private Config config;
 
+    /** Темп запросов этого экземпляра: окно, полоса записи и повторы 429 — см. {@link RateLimiter}. */
+    private final RateLimiter rateLimiter;
+
     private String paymentId;
     private String paymentCode;
     private String generateAuth = "N";
     private String fingerprint;
-
-    /** Секции {@code order/make}, которые без {@code X-Fingerprint} не создаются вообще. */
-    private static final Set<String> FINGERPRINT_REQUIRED_SECTIONS =
-            Collections.unmodifiableSet(new LinkedHashSet<>(Arrays.asList("resident", "scraper")));
 
     /**
      * Key placed in <a href="https://proxy-seller.com/personal/api/">https://proxy-seller.com/personal/api/</a>
@@ -75,12 +84,24 @@ public class Api {
      * @throws Exception if an error occurs
      */
     public Api(Config config) throws Exception {
+        this(config, new RateLimiter());
+    }
+
+    /**
+     * Для тестов: темп на поддельных часах и сне.
+     *
+     * @param config      the configuration
+     * @param rateLimiter pacing state of this instance
+     * @throws Exception if an error occurs
+     */
+    Api(Config config, RateLimiter rateLimiter) throws Exception {
         if (config == null || config.getKey() == null || config.getKey().isBlank()) {
             throw new Exception("Need key, placed in https://proxy-seller.com/personal/api/");
         }
         config.setBaseUri(resolveBaseUri(config.getBaseUri(), config.getKey()));
         this.config = config;
         this.fingerprint = config.getFingerprint();
+        this.rateLimiter = Objects.requireNonNull(rateLimiter, "rateLimiter");
     }
 
     public String getPaymentId() {
@@ -88,12 +109,15 @@ public class Api {
     }
 
     /**
-     * Payment system id (MongoDB ObjectId from {@code balance/payments/list}).
+     * Payment system used by {@code order/*}, {@code prolong/*}, {@code autoprolong/*} and, when
+     * no id is passed per call, {@code balance/add}.
      *
-     * <p>On {@code order/*} and {@code prolong/*} this field also accepts a payment
-     * <b>code</b> ({@code balance}) — the server falls back to a code lookup when the value
-     * is not a valid id. {@code balance/add} resolves ids only, in either field.
-     * For the inner balance you can also use {@code setPaymentCode("balance")}.
+     * <p>Orders and renewals are paid only from the internal balance or a saved card — the codes
+     * {@code balance} and {@code paddle_subscription}, see {@link #setPaymentCode(String)}. This
+     * field accepts those codes too: on {@code order/*} and {@code prolong/*} the server falls back
+     * to a code lookup when the value is not a valid id. {@code balance/add} resolves ids only;
+     * there it is the id of a top-up system from {@link #balancePaymentsList()}, and such an id is
+     * refused by {@code order/make} — prefer {@link #balanceAdd(Double, String)} for top-ups.
      *
      * @param paymentId payment system ObjectId, or a payment code on order/prolong
      */
@@ -109,12 +133,15 @@ public class Api {
     }
 
     /**
-     * Stable payment system code, for example {@code balance}. Codes are
-     * preferable to environment-specific MongoDB ids. Resolved by {@code order/*} and
-     * {@code prolong/*}; {@code balance/add} needs an id — see {@link #balanceAdd(Double)}.
+     * Stable payment system code. Codes are preferable to environment-specific MongoDB ids.
+     * Resolved by {@code order/*} and {@code prolong/*}, where the usable ones are
+     * {@code balance} (the internal balance) and {@code paddle_subscription} (the saved card,
+     * which needs an active card subscription); {@code balance/add} needs an id — see
+     * {@link #balanceAdd(Double)}.
      *
-     * <p>{@code balance/payments/list} returns only {@code id} and {@code name}, so a payment
-     * code is something you have to know, not something the reference hands you.
+     * <p>{@code balance/payments/list} returns only {@code id} and {@code name} of the top-up
+     * systems and never lists the internal balance, so these codes are something you have to
+     * know, not something a list hands you.
      *
      * @param paymentCode stable payment system code
      */
@@ -144,21 +171,18 @@ public class Api {
     }
 
     /**
-     * Value of the {@code X-Fingerprint} header of {@code order/make}.
+     * Value of the optional {@code X-Fingerprint} header of {@code order/make}.
      *
-     * <p>The header is declared <b>required</b> on the whole operation. Sections other than
-     * {@code resident} and {@code scraper} ignore it, so sending it always is safe; those two
-     * are not created at all without it — the order service answers
-     * {@code Header X-Fingerprint is required} and nothing is ordered. The SDK therefore refuses
-     * a residential or scraper {@code order/make} locally while the value is unset, instead of
-     * spending a round trip on a request that is guaranteed to be rejected.
+     * <p>When a value is set, the header goes out with every {@code order/make}; when it is
+     * not, the header is simply not sent. No section refuses an order without it — when
+     * present, the value is used for anti-fraud checks and affiliate attribution.
      *
-     * <p>Any opaque string is accepted — the shape is not validated — but it must be a
+     * <p>Any opaque string is accepted — the shape is not validated — but it should be a
      * <b>stable identifier of the installation</b>. The SDK never generates one: a value
-     * randomized per process would break the anti-fraud and affiliate attribution the header
+     * randomized per process would defeat the anti-fraud and affiliate attribution the header
      * exists for.
      *
-     * @param fingerprint stable identifier of the calling installation
+     * @param fingerprint stable identifier of the calling installation, or null to send none
      */
     public void setFingerprint(String fingerprint) {
         this.fingerprint = fingerprint;
@@ -216,7 +240,31 @@ public class Api {
         return response.bodyAsString();
     }
 
+    /**
+     * Единственная точка, через которую SDK отправляет HTTP-запросы, — поэтому темп живёт здесь,
+     * а не в методах эндпоинтов: категория берётся из таблицы по пути
+     * ({@link RateLimiter#classify(String)}), ожидание и повторы 429 — в {@link RateLimiter}.
+     * Выключенный темп — это прежнее поведение один в один: одна отправка, без ожидания.
+     */
     private HttpResponse execute(String method, String uri, RequestOptions options) throws ApiException {
+        Config current = config;
+        if (!current.isRateLimitEnabled()) {
+            return send(method, uri, options);
+        }
+        return rateLimiter.execute(RateLimiter.classify(uri), current, () -> send(method, uri, options));
+    }
+
+    /**
+     * Одна HTTP-отправка, без темпа и без повторов. Пакетная видимость — шов для тестов:
+     * подменив её, тест гоняет настоящий темп и разбор ответов без сети.
+     *
+     * @param method  HTTP-метод
+     * @param uri     путь эндпоинта относительно корня с ключом
+     * @param options тело, query и заголовки
+     * @return статус, тип, тело и {@code Retry-After} ответа
+     * @throws ApiException при сетевой ошибке
+     */
+    HttpResponse send(String method, String uri, RequestOptions options) throws ApiException {
         HttpURLConnection connection = null;
         try {
             URL url = new URL(buildUrl(uri, options));
@@ -261,7 +309,8 @@ public class Api {
                     ? connection.getInputStream()
                     : connection.getErrorStream();
             byte[] body = readAll(stream);
-            return new HttpResponse(status, connection.getContentType(), body);
+            return new HttpResponse(status, connection.getContentType(), body,
+                    connection.getHeaderField("Retry-After"));
         } catch (IOException e) {
             throw new ApiException("Request failed: " + e.getMessage(), null, null, e);
         } finally {
@@ -489,15 +538,18 @@ public class Api {
         return null;
     }
 
-    private static final class HttpResponse {
+    static final class HttpResponse {
         final int status;
         final String contentType;
         final byte[] body;
+        /** Заголовок {@code Retry-After} — по нему темп выдерживает паузу перед повтором 429. */
+        final String retryAfter;
 
-        private HttpResponse(int status, String contentType, byte[] body) {
+        HttpResponse(int status, String contentType, byte[] body, String retryAfter) {
             this.status = status;
             this.contentType = contentType;
             this.body = body == null ? new byte[0] : body;
+            this.retryAfter = retryAfter;
         }
 
         private String bodyAsString() {
@@ -650,9 +702,9 @@ public class Api {
     }
 
     /**
-     * balance/add сверяет ТОЛЬКО paymentId со списком balance/payments/list
-     * (normalizeOrderReferenceCodes здесь не вызывается вовсе, в отличие от order/* и
-     * prolong/*). Раньше при заданном одном paymentCode на сервер уезжал paymentId=null,
+     * balance/add сверяет ТОЛЬКО paymentId со списком balance/payments/list (коды платёжек
+     * здесь не разрешаются вовсе, в отличие от order/* и prolong/*). Раньше при заданном одном
+     * paymentCode на сервер уезжал paymentId=null,
      * и клиент получал невнятное "Incorrect payment system" вместо причины.
      *
      * @param explicitPaymentId id, переданный в вызов
@@ -676,6 +728,10 @@ public class Api {
 
     /**
      * Get a list of payment systems for balance replenishing.
+     *
+     * <p>These are for {@link #balanceAdd(Double, String)} only. The internal balance is never
+     * listed, and orders and renewals take the codes {@code balance} or
+     * {@code paddle_subscription} instead — see {@link #setPaymentCode(String)}.
      *
      * @return An array of payment system items.
      * @throws Exception Error
@@ -762,7 +818,7 @@ public class Api {
         return (Map) (request("post", "balance/autotopup/set", options));
     }
 
-    /** Поля, удалённые из balance/autotopup/set 18.08.2026 (AutoTopupSetRequestClientDto). */
+    /** Поля, удалённые из контракта balance/autotopup/set 18.08.2026. */
     private static final Set<String> REMOVED_AUTO_TOPUP_FIELDS =
             Collections.unmodifiableSet(new LinkedHashSet<>(Arrays.asList("dailyCountCap", "monthlyAmountCap")));
 
@@ -1204,13 +1260,12 @@ public class Api {
      * Create an order Scraper.
      * Attention! Calling this method will deduct $ from your balance!
      *
-     * <p>Requires {@code X-Fingerprint} — see {@link #setFingerprint(String)}. Without it the
-     * order service creates nothing, so the SDK refuses the call locally.
+     * <p>{@code X-Fingerprint} is optional and sent when set — see
+     * {@link #setFingerprint(String)}.
      *
      * @param tarifId Scraper tariff ObjectId, or the tariff code (exact match)
      * @param coupon  The coupon code
      * @return An array containing the order details
-     * @throws IllegalArgumentException when no fingerprint is available
      * @throws Exception Error
      */
     public Map orderMakeScraper(String tarifId, String coupon) throws Exception {
@@ -1306,13 +1361,12 @@ public class Api {
      * Create an order Resident.
      * Attention! Calling this method will deduct $ from your balance!
      *
-     * <p>Requires {@code X-Fingerprint} — see {@link #setFingerprint(String)}. Without it the
-     * order service creates nothing, so the SDK refuses the call locally.
+     * <p>{@code X-Fingerprint} is optional and sent when set — see
+     * {@link #setFingerprint(String)}.
      *
      * @param tarifId Resident tariff ObjectId, or the tariff code (exact match)
      * @param coupon  The coupon code
      * @return An array containing the order details
-     * @throws IllegalArgumentException when no fingerprint is available
      * @throws Exception Error
      */
     public Map orderMakeResident(String tarifId, String coupon) throws Exception {
@@ -1353,8 +1407,7 @@ public class Api {
 
     /**
      * Микс бывает двух секций: {@code mix} (IPv4-микс) и {@code mix_isp} (ISP-микс). Раньше
-     * sectionCode был зашит как "mix" даже для ISP-пакета, и сервер
-     * (resolveLegacyReferenceProxyType) разбирал заказ как IPv4.
+     * sectionCode был зашит как "mix" даже для ISP-пакета, и сервер разбирал заказ как IPv4.
      *
      * @param sectionCode mix или mix_isp
      */
@@ -1414,8 +1467,7 @@ public class Api {
 
     /**
      * Тарифные секции — {@code resident} и {@code scraper}: у них нет ни страны, ни периода,
-     * заказ считается по тарифу (TARIFF_BASED_SECTION_CODES на сервере). Обе требуют
-     * {@code X-Fingerprint} на {@code order/make}.
+     * заказ считается по тарифу.
      *
      * @param sectionCode resident или scraper
      * @param tarifId     Tariff ObjectId, or the tariff code (exact match)
@@ -1492,11 +1544,11 @@ public class Api {
     }
 
     /**
-     * Повторяет ClientApiService.parseMixSelection: сервер распознаёт mix не только по
+     * Повторяет серверное правило выбора микса: сервер распознаёт mix не только по
      * mixId/mixCode, но и через countryId — строкой "packageId:quantity" либо
-     * countryId=packageId вместе с quantity. Если mix распознан, requiresClientApiGoal
-     * возвращает false и цель НЕ требуется. Раньше проверялись только mixId/mixCode, из-за
-     * чего orderCalc(Map)/OrderOptions с mix через countryId блокировались локально.
+     * countryId=packageId вместе с quantity. Если mix распознан, цель НЕ требуется. Раньше
+     * проверялись только mixId/mixCode, из-за чего orderCalc(Map)/OrderOptions с mix через
+     * countryId блокировались локально.
      */
     private static boolean isMixResolved(String section, Map json) {
         if (!"mix".equals(section) && !"mix_isp".equals(section)) {
@@ -1536,12 +1588,11 @@ public class Api {
     /**
      * Create an order.
      *
-     * <p>{@code X-Fingerprint} is sent whenever a value is available — see
-     * {@link #setFingerprint(String)}.
+     * <p>{@code X-Fingerprint} is optional: it is sent whenever a value is available — see
+     * {@link #setFingerprint(String)} — and left out otherwise.
      *
      * @param json A free format map to send to the endpoint.
      * @return The result of the order creation.
-     * @throws IllegalArgumentException on a resident/scraper order with no fingerprint set
      * @throws Exception Error
      */
     public Map orderMake(Map json) throws Exception {
@@ -1553,16 +1604,15 @@ public class Api {
      *
      * @param json        A free format map to send to the endpoint.
      * @param fingerprint Stable installation identifier; null falls back to
-     *                    {@link #setFingerprint(String)}.
+     *                    {@link #setFingerprint(String)}, and with neither the header is not sent.
      * @return The result of the order creation.
-     * @throws IllegalArgumentException on a resident/scraper order with no fingerprint available
      * @throws Exception Error
      */
     public Map orderMake(Map json, String fingerprint) throws Exception {
         assertTargetName(json);
         RequestOptions options = new RequestOptions();
         options.setJson(json);
-        putIfNotNull(options.getHeaders(), "X-Fingerprint", requireFingerprint(json, fingerprint));
+        putIfNotNull(options.getHeaders(), "X-Fingerprint", resolveFingerprint(fingerprint));
         return ((Map) (request("post", "order/make", options)));
     }
 
@@ -1595,16 +1645,17 @@ public class Api {
     /**
      * Get the list of orders with filters.
      *
-     * <p>{@code data} is not a flat list but a {@code metadata} + {@code items} pair — the v1
-     * shape, because the same response reaches legacy-API clients through the reverse mirror.
+     * <p>Query filters and response fields use snake_case names such as {@code start_date},
+     * {@code is_extend} — see {@link OrderListOptions}. {@code data} is not a flat list but a
+     * {@code metadata} + {@code items} pair.
      * {@code metadata} (total_orders, total_pages, current_page, current_limit) is always there:
      * without {@code limit} it reports {@code total_pages = 1}, {@code current_limit = 0} and the
      * whole list sits in {@code items}.
      *
      * <p>{@code id}, {@code order_id}, {@code order_number}, {@code base_order_number} and
-     * {@code items[].order_part_id} are <b>strings</b>. {@code id} is the legacy bitrix number (or
-     * a deterministic surrogate of {@code base_order_number}); our ObjectId lives in
-     * {@code order_id} — the same value {@code proxy/list} returns as {@code order_id}. {@code summ}
+     * {@code items[].order_part_id} are <b>strings</b>. {@code id} is a numeric order ID sent as a
+     * string; the ObjectId is {@code order_id} — the same value {@code proxy/list} returns as
+     * {@code order_id}, and the one {@link ProlongOptions#orderIds} takes. {@code summ}
      * and the nested {@code items[].price} are strings with the currency already in them
      * ({@code $25.00}), {@code auto_order} / {@code is_extend} are {@code Y}/{@code N}, and the
      * dates are ISO 8601 with offset, {@code 2026-09-01T14:15:26+00:00} ({@code date_payed} is null until the order is paid).
@@ -1623,40 +1674,29 @@ public class Api {
     }
 
     /**
-     * Значение X-Fingerprint для конкретного order/make.
+     * Значение X-Fingerprint для конкретного order/make: переданное в вызов, иначе заданное через
+     * setFingerprint / Config.
      *
-     * <p>Заголовок объявлен обязательным на всей операции, но прочие секции его игнорируют, так
-     * что при заданном значении шлём его ВСЕГДА. А вот resident и scraper без него не создаются
-     * вовсе: sdk-service отвечает {@code Header X-Fingerprint is required}, деньги не списываются,
-     * заказ не появляется. Отбиваем такой вызов локально — тем же приёмом, что проверку
-     * {@code Set [paymentId]}, чтобы не тратить круг на заведомо отклонённый запрос.
+     * <p>Заголовок необязателен: ни одна секция без него заказ не отклоняет, поэтому его
+     * отсутствие — НЕ ошибка, заголовок просто не уходит. При заданном значении шлём его всегда.
      *
-     * <p>Значение НЕ генерируем: контракт требует стабильный идентификатор установки, а случайное
-     * значение на процесс ломает анти-фрод и affiliate-атрибуцию, ради которых заголовок и введён.
+     * <p>Значение НЕ генерируем: нужен стабильный идентификатор установки, а случайное значение
+     * на процесс ломает анти-фрод и affiliate-атрибуцию, ради которых заголовок и введён.
      *
-     * @param json        тело заказа
-     * @param override    значение, переданное в конкретный вызов
-     * @return значение заголовка, либо null — заголовок не нужен и не задан
+     * @param override значение, переданное в конкретный вызов
+     * @return значение заголовка, либо null — значение не задано, заголовок не шлём
+     * @throws IllegalArgumentException если заданное значение содержит CR/LF
      */
-    protected String requireFingerprint(Map json, String override) {
+    protected String resolveFingerprint(String override) {
         String value = override != null && !override.trim().isEmpty() ? override.trim() : fingerprint;
-        if (value != null && !value.trim().isEmpty()) {
-            String trimmed = value.trim();
-            if (trimmed.indexOf('\r') >= 0 || trimmed.indexOf('\n') >= 0) {
-                throw new IllegalArgumentException("fingerprint contains forbidden characters (CR/LF)");
-            }
-            return trimmed;
+        if (value == null || value.trim().isEmpty()) {
+            return null;
         }
-        Object rawSection = json == null ? null : json.get("sectionCode");
-        String section = rawSection == null ? null : rawSection.toString().trim();
-        if (FINGERPRINT_REQUIRED_SECTIONS.contains(section)) {
-            throw new IllegalArgumentException("X-Fingerprint is required for " + section
-                    + " orders (client api returns \"Header X-Fingerprint is required\" and creates"
-                    + " nothing). Set a STABLE identifier of your installation with setFingerprint(...),"
-                    + " with new Config(key, baseUri, fingerprint), or pass it to"
-                    + " orderMake(json, fingerprint) — do not generate a fresh value per process");
+        String trimmed = value.trim();
+        if (trimmed.indexOf('\r') >= 0 || trimmed.indexOf('\n') >= 0) {
+            throw new IllegalArgumentException("fingerprint contains forbidden characters (CR/LF)");
         }
-        return null;
+        return trimmed;
     }
 
     private Map prepareOrderOptions(OrderOptions orderOptions, boolean makeOrder) {
@@ -1677,31 +1717,48 @@ public class Api {
         return map;
     }
 
-    protected static Map prepareProlong(List ids, String periodId, String coupon) {
-        LinkedHashMap<String, Object> map = new LinkedHashMap<>();
-        map.put("ids", ids);
-        map.put("periodId", periodId);
-        map.put("coupon", coupon);
-        return map;
+    /** Типы, которые продаются и продлеваются только целым заказом: их выбор — {@code orderIds}. */
+    private static final Set<String> ORDER_PROLONG_TYPES =
+            Collections.unmodifiableSet(new LinkedHashSet<>(Arrays.asList("ipv6", "mix", "mix_isp")));
+
+    /**
+     * Тип прокси в том виде, в котором его сравнивает сервер: без пробелов по краям, в нижнем
+     * регистре, {@code -} и пробел внутри заменены на {@code _}. Так {@code "MIX-ISP"} и
+     * {@code "mix isp"} оказываются тем же {@code mix_isp}, что и на сервере.
+     *
+     * @param type тип из сегмента пути
+     * @return нормализованный тип; пустая строка для null
+     */
+    protected static String normalizeProxyType(String type) {
+        return type == null ? "" : type.trim().toLowerCase(Locale.ROOT).replace('-', '_').replace(' ', '_');
     }
 
     /**
-     * Splits what the caller passed into addresses and ObjectIds.
+     * Whether the type is renewed only as whole orders, selected by {@code orderIds}, rather than
+     * per proxy by {@code ipIds}/{@code ips}: true for {@code ipv6}, {@code mix} and
+     * {@code mix_isp}.
      *
-     * <p>Renewing by the addresses themselves is what a client actually has on hand — those are
-     * the strings {@code proxy/list} returns. The server accepts them in {@code ips} and resolves
-     * them into {@code ids} itself ({@code ClientApiService.resolveProlongIpsToIds}, called
-     * unconditionally for both calc and make). An address always contains a dot or a colon
-     * (ipv4/isp/mix {@code ip}, ipv6 {@code ip} = {@code host:port}, mobile
-     * {@code ip:port_http:port_socks}) while an ObjectId is 24 hex characters with neither, so a
-     * mixed list works too.
+     * @param type proxy type, in any case and with {@code -} or a space instead of {@code _}
+     * @return whether {@code orderIds} is the selection field of this type
+     */
+    protected static boolean isOrderProlongType(String type) {
+        return ORDER_PROLONG_TYPES.contains(normalizeProxyType(type));
+    }
+
+    /** Резидентский пакет: автопродление без выборки, пакет целиком. */
+    private static boolean isResidentType(String type) {
+        return "resident".equals(normalizeProxyType(type));
+    }
+
+    /**
+     * Splits what the caller passed into addresses and ids.
      *
-     * <p>For ipv6 the {@code ip} field already contains the gateway and its port
-     * ({@code 1.2.3.4:26000}) while {@code ip_only} holds the gateway alone — pass {@code ip}
-     * as-is, the colon routes it into {@code ips} like any other address.
+     * <p>An address always contains a dot or a colon (ipv4/isp {@code ip}, mobile
+     * {@code ip:port_http:port_socks}), while an id — of a proxy or of an order — is 24 hex
+     * characters with neither. Nulls and blank values are dropped, the rest is trimmed.
      *
-     * @param ipsOrIds addresses, ObjectId strings, or a mix of both
-     * @return index 0 — addresses, index 1 — ObjectIds; either may be empty
+     * @param ipsOrIds addresses, ids, or a mix of both
+     * @return index 0 — addresses, index 1 — ids; either may be empty
      */
     protected static List<List<String>> splitProlongTargets(Collection<?> ipsOrIds) {
         List<String> ips = new ArrayList<>();
@@ -1728,17 +1785,50 @@ public class Api {
         return split;
     }
 
-    /** Routes a caller-supplied list into {@code ips}/{@code ids} on the options object. */
-    private static void routeProlongTargets(ProlongOptions prolongOptions, List ipsOrIds) {
+    /** Отказ для списка, где вперемешку id прокси и адреса (ipv4 / isp / mobile). */
+    static final String MIXED_SELECTION_MESSAGE =
+            "Mixing proxy ids and addresses in one call is not supported: pass either ids or addresses";
+
+    /**
+     * Routes a caller-supplied list onto the options object, by the shape of each value and by
+     * the proxy type:
+     * <ul>
+     *   <li>a value with a dot or a colon is an address and goes to {@code ips}, whatever the
+     *       type;</li>
+     *   <li>any other value is an id: {@code orderIds} for ipv6/mix/mix_isp, which are renewed
+     *       only as whole orders, {@code ipIds} for every other type.</li>
+     * </ul>
+     * A field that would stay empty is left unset, so no empty key reaches the payload.
+     *
+     * <p>A list that mixes proxy ids and addresses for a per-proxy type (ipv4/isp/mobile) is
+     * rejected: when both {@code ipIds} and {@code ips} arrive, the server renews by
+     * {@code ipIds} and ignores {@code ips}, so the addresses would silently drop out of a paid
+     * renewal. For ipv6/mix/mix_isp a mixed list is routed as is and the server rejects the
+     * address part itself. Resident is left to {@code prepareAutoProlong}, which rejects any
+     * selection there with a message of its own.
+     *
+     * @param type           proxy type from the path
+     * @param prolongOptions the options to fill
+     * @param ipsOrIds       addresses, proxy ids or order ids; may be null
+     * @throws IllegalArgumentException when ids and addresses are mixed for a per-proxy type
+     */
+    protected static void routeProlongTargets(String type, ProlongOptions prolongOptions, Collection<?> ipsOrIds) {
         List<List<String>> split = splitProlongTargets(ipsOrIds);
         List<String> ips = split.get(0);
         List<String> ids = split.get(1);
-        // An empty ids next to ips would silently win: the server prefers ids when both are set.
-        if (!ids.isEmpty()) {
-            prolongOptions.ids = ids;
+        if (!ips.isEmpty() && !ids.isEmpty() && !isOrderProlongType(type) && !isResidentType(type)) {
+            throw new IllegalArgumentException(MIXED_SELECTION_MESSAGE + " (" + normalizeProxyType(type)
+                    + ": when both arrive, the server renews by ipIds and ignores ips)");
         }
         if (!ips.isEmpty()) {
             prolongOptions.ips = ips;
+        }
+        if (!ids.isEmpty()) {
+            if (isOrderProlongType(type)) {
+                prolongOptions.orderIds = ids;
+            } else {
+                prolongOptions.ipIds = ids;
+            }
         }
     }
 
@@ -1760,27 +1850,57 @@ public class Api {
     /**
      * Calculate the renewal.
      *
-     * @param type      The type of the renewal (ipv4, ipv6, mobile, isp, mix).
-     * @param ipsOrIds  The addresses themselves, exactly as {@code proxy/list} returns them:
-     *                  {@code 1.2.3.4} for ipv4/isp/mix, {@code host:port} for ipv6 (its
-     *                  {@code ip} field already carries the gateway and its port, e.g.
-     *                  {@code 1.2.3.4:26000}), {@code ip:port_http:port_socks} for mobile.
-     *                  ObjectId strings are accepted for every type, and a mixed list works —
-     *                  each value is routed by its shape.
+     * <p>What to pass follows the proxy type, and every value comes straight out of
+     * {@code proxy/list}:
+     * <ul>
+     *   <li>{@code ipv4}, {@code isp} — the {@code ip} field ({@code 1.2.3.4}) or the proxy
+     *       {@code id};</li>
+     *   <li>{@code mobile} — {@code ip:port_http:port_socks} or the proxy {@code id};</li>
+     *   <li>{@code ipv6}, {@code mix}, {@code mix_isp} — the {@code order_id} (also returned by
+     *       {@code order/list}). These types are renewed only as whole orders: every active proxy
+     *       of the type in the given orders at once, for mix/mix_isp the mix packages of those
+     *       orders.</li>
+     * </ul>
+     *
+     * <p>Each value is routed by its shape and by the type: a value with a dot or a colon goes
+     * out as {@code ips}, any other value as {@code ipIds} (ipv4/isp/mobile) or {@code orderIds}
+     * (ipv6/mix/mix_isp). Blank values are dropped and an empty field is not sent.
+     *
+     * <p>For ipv4/isp/mobile a list holds either ids or addresses, not both: when {@code ipIds}
+     * and {@code ips} arrive together, the server renews by {@code ipIds} and ignores the
+     * addresses, so a mixed list is rejected before anything is sent. For ipv6/mix/mix_isp an
+     * address still goes out as {@code ips} and is rejected by the server
+     * ({@code [ips] is not applicable for ipv6: prolong by [orderIds]}), and an order that is
+     * not yours or has no active proxy of the type fails the whole request with
+     * {@code Incorrect orderIds} (code 29).
+     *
+     * @param type      The proxy type: ipv4, isp, mobile, ipv6, mix or mix_isp.
+     * @param ipsOrIds  Addresses or proxy ids for ipv4/isp/mobile, order ids for
+     *                  ipv6/mix/mix_isp — see above.
      * @param periodId  Period ObjectId, or the period code ({@code 1w}, {@code 1m}, {@code 3m}).
      * @param coupon    The coupon code.
      * @return The result of the renewal calculation.
+     * @throws IllegalArgumentException when the list mixes proxy ids and addresses for
+     *                                  ipv4/isp/mobile
      * @throws Exception Error
      */
     public Map prolongCalc(String type, List ipsOrIds, String periodId, String coupon) throws Exception {
         ProlongOptions prolongOptions = new ProlongOptions();
-        routeProlongTargets(prolongOptions, ipsOrIds);
+        routeProlongTargets(type, prolongOptions, ipsOrIds);
         prolongOptions.periodId = periodId;
         prolongOptions.coupon = coupon;
         return prolongCalc(type, prolongOptions);
     }
 
-    /** Calculate a renewal with the complete Client API v2 payload. */
+    /**
+     * Calculate a renewal with the complete Client API v2 payload. The fields are sent as set —
+     * see {@link ProlongOptions} for which selection field fits which type.
+     *
+     * @param type           The proxy type: ipv4, isp, mobile, ipv6, mix or mix_isp.
+     * @param prolongOptions selection, period, coupon and payment system
+     * @return The result of the renewal calculation.
+     * @throws Exception Error
+     */
     public Map prolongCalc(String type, ProlongOptions prolongOptions) throws Exception {
         RequestOptions options = new RequestOptions();
         options.setJson(prepareProlong(prolongOptions));
@@ -1791,18 +1911,26 @@ public class Api {
      * Create a renewal order.
      * Attention! Calling this method will deduct $ from your balance!
      *
-     * @param type      The type of the renewal (ipv4, ipv6, mobile, isp, mix).
-     * @param ipsOrIds  The addresses themselves, exactly as {@code proxy/list} returns them — see
-     *                  {@link #prolongCalc(String, List, String, String)}. ObjectId strings and
-     *                  mixed lists work too.
+     * <p>{@code ipsOrIds} is routed exactly as in
+     * {@link #prolongCalc(String, List, String, String)}: addresses or proxy ids for
+     * ipv4/isp/mobile, order ids for ipv6/mix/mix_isp. For ipv4/isp/mobile a list that mixes
+     * ids and addresses is rejected before anything is charged — the server would renew by the
+     * ids alone.
+     *
+     * @param type      The proxy type: ipv4, isp, mobile, ipv6, mix or mix_isp.
+     * @param ipsOrIds  Addresses or proxy ids for ipv4/isp/mobile, order ids for
+     *                  ipv6/mix/mix_isp.
      * @param periodId  Period ObjectId, or the period code ({@code 1w}, {@code 1m}, {@code 3m}).
      * @param coupon    The coupon code.
-     * @return The result of the renewal order creation.
+     * @return The renewal — see {@link #prolongMake(String, ProlongOptions)}.
+     * @throws IllegalArgumentException when the list mixes proxy ids and addresses for
+     *                                  ipv4/isp/mobile
+     * @throws ApiException when nothing was renewed, for example on insufficient funds
      * @throws Exception Error
      */
     public Map prolongMake(String type, List ipsOrIds, String periodId, String coupon) throws Exception {
         ProlongOptions prolongOptions = new ProlongOptions();
-        routeProlongTargets(prolongOptions, ipsOrIds);
+        routeProlongTargets(type, prolongOptions, ipsOrIds);
         prolongOptions.periodId = periodId;
         prolongOptions.coupon = coupon;
         return prolongMake(type, prolongOptions);
@@ -1810,8 +1938,21 @@ public class Api {
 
     /**
      * Create a renewal order with the complete Client API v2 payload.
+     * Attention! Calling this method will deduct $ from your balance!
      *
-     * @throws ApiException при нехватке средств — продление НЕ состоялось.
+     * <p>On success the answer carries {@code orderIds} — every renewed order, the same
+     * {@code order_id} values as in {@code proxy/list} and {@code order/list}, since one request
+     * can renew several orders — plus {@code orderId} (the first of them), {@code total},
+     * {@code listBaseOrderNumbers} (one base order number per renewed order or mix package, as
+     * {@code base_order_number} of {@code order/list}) and {@code balance}.
+     *
+     * @param type           The proxy type: ipv4, isp, mobile, ipv6, mix or mix_isp.
+     * @param prolongOptions selection, period, coupon and payment system
+     * @return The renewal: {@code orderIds}, {@code orderId}, {@code total},
+     *         {@code listBaseOrderNumbers} and {@code balance}.
+     * @throws ApiException when nothing was renewed. On insufficient funds the calculation, with
+     *                      its {@code warning}, is in {@link ApiException#getResponseData()}.
+     * @throws Exception Error
      */
     public Map prolongMake(String type, ProlongOptions prolongOptions) throws Exception {
         RequestOptions options = new RequestOptions();
@@ -1820,22 +1961,26 @@ public class Api {
     }
 
     /**
-     * При нехватке средств prolong/make отдаёт конверт status="error" с ПУСТЫМ errors[] и
-     * calc-данными в data (ProlongMakeResponseClientDto.ofInsufficientFunds,
-     * ClientApiService.groovy:3185) — ровно ту же форму, что легитимный warning у prolong/calc.
-     * Из-за этого decodeEnvelopeOrRaw возвращал такие данные как успех, и несостоявшееся
-     * продление выглядело как состоявшееся. Успех определяется непустым orderId
-     * (ProlongMakeDataClientDto), провал — полем warning.
+     * Успех prolong/make — {@code data = {orderId, orderIds[], total, listBaseOrderNumbers[],
+     * balance}}: orderIds — все продлённые заказы, orderId — первый из них. Нехватка средств
+     * приходит конвертом status="error" с расчётом и его warning в data; когда errors[] при этом
+     * заполнен, ApiException бросает уже разбор конверта. Но конверт status="error" с ПУСТЫМ
+     * errors[] и заполненным data — ровно та форма, которой prolong/calc отдаёт легитимный
+     * warning, — decodeEnvelopeOrRaw возвращает как данные, и несостоявшееся продление выглядело
+     * бы состоявшимся. Поэтому успех определяется непустым orderIds или непустым orderId, а всё
+     * остальное превращается в ApiException с warning в сообщении и data в getResponseData().
      *
-     * order/make этим не страдает: у OrderMakeResponseClientDto только ofSuccess/ofError,
-     * и при ошибке errors[] всегда заполнен.
+     * order/make этим не страдает: ошибку он отдаёт только с заполненным errors[].
+     *
+     * @param data data из ответа prolong/make
+     * @return те же data, если продление состоялось
+     * @throws ApiException если в data нет ни orderIds, ни orderId
      */
-    private static Map assertProlongMade(Map data) throws ApiException {
+    protected static Map assertProlongMade(Map data) throws ApiException {
         if (data == null) {
             return data;
         }
-        Object orderId = data.get("orderId");
-        if (orderId != null && !orderId.toString().trim().isEmpty()) {
+        if (hasFilledItem(data.get("orderIds")) || isFilled(data.get("orderId"))) {
             return data;
         }
         Object warning = data.get("warning");
@@ -1847,13 +1992,28 @@ public class Api {
         throw new ApiException(message, 0, null, 200, null, data);
     }
 
+    /** Список, в котором есть хотя бы одно непустое значение. */
+    private static boolean hasFilledItem(Object values) {
+        if (!(values instanceof Collection)) {
+            return false;
+        }
+        for (Object value : (Collection<?>) values) {
+            if (isFilled(value)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     /**
      * Calculate the upcoming automatic extension charge.
      *
      * <p>Nothing is changed and nothing is charged — the call answers what automatic extension
      * will cost and <b>when</b> it will be taken. Selection and reference fields are the same as
-     * {@code prolong/calc}, plus {@code subscriptionId} and {@code tarifId}
-     * ({@link AutoProlongOptions}).
+     * {@code prolong/calc} — {@code ipIds} or {@code ips} for ipv4/isp/mobile, {@code orderIds}
+     * for ipv6/mix/mix_isp, no selection at all for resident — plus {@code subscriptionId} and
+     * {@code tarifId} ({@link AutoProlongOptions}). Any selection sent with {@code resident} is
+     * rejected locally: automatic extension applies to the whole package there.
      *
      * <p>Returned fields: {@code warning}, {@code balance}, {@code total}, {@code quantity},
      * {@code currency}, {@code discount}, {@code orders}, {@code items[]}, {@code days}
@@ -1873,7 +2033,8 @@ public class Api {
      * @param type              ipv4, ipv6, mobile, isp, mix, mix_isp or resident
      * @param autoProlongOptions selection, period and payment system
      * @return The calculated charge.
-     * @throws IllegalArgumentException for {@code scraper}, or with no payment system set
+     * @throws IllegalArgumentException for {@code scraper}, with any selection for
+     *                                  {@code resident}, or with no payment system set
      * @throws Exception Error
      */
     public Map autoProlongCalc(String type, AutoProlongOptions autoProlongOptions) throws Exception {
@@ -1885,18 +2046,20 @@ public class Api {
     /**
      * Calculate the upcoming automatic extension charge for the given proxies.
      *
-     * @param type     The type of the proxies (ipv4, ipv6, mobile, isp, mix, mix_isp).
-     * @param ipsOrIds The addresses themselves, exactly as {@code proxy/list} returns them, or
-     *                 ObjectId strings — routed by shape, see
+     * @param type     The proxy type: ipv4, isp, mobile, ipv6, mix or mix_isp.
+     * @param ipsOrIds Addresses or proxy ids for ipv4/isp/mobile, order ids for
+     *                 ipv6/mix/mix_isp — routed by shape and type exactly as in
      *                 {@link #prolongCalc(String, List, String, String)}.
      * @param periodId Period ObjectId, or the period code ({@code 1w}, {@code 1m}, {@code 3m}).
      *                 Required by calc and enable; the period is what the charge will buy.
      * @return The calculated charge.
+     * @throws IllegalArgumentException when the list mixes proxy ids and addresses for
+     *                                  ipv4/isp/mobile, or is not empty for {@code resident}
      * @throws Exception Error
      */
     public Map autoProlongCalc(String type, List ipsOrIds, String periodId) throws Exception {
         AutoProlongOptions autoProlongOptions = new AutoProlongOptions();
-        routeProlongTargets(autoProlongOptions, ipsOrIds);
+        routeProlongTargets(type, autoProlongOptions, ipsOrIds);
         autoProlongOptions.periodId = periodId;
         return autoProlongCalc(type, autoProlongOptions);
     }
@@ -1904,8 +2067,8 @@ public class Api {
     /**
      * Calculate the upcoming automatic extension charge of the resident package.
      *
-     * <p>The unit here is the package, not addresses: no {@code ids}/{@code ips} and no
-     * {@code periodId}. The answer carries {@code quantity: 1}, the tariff's own period in
+     * <p>The unit here is the package, not addresses: no {@code ipIds}/{@code ips}/{@code orderIds}
+     * and no {@code periodId}. The answer carries {@code quantity: 1}, the tariff's own period in
      * {@code days} and a null {@code chargeDate} — a resident package renews on expiry OR on
      * traffic exhaustion, so no single date describes it; read {@code dateEnd} instead.
      *
@@ -1941,15 +2104,17 @@ public class Api {
      * {@code paddle_subscription} are accepted, and {@code paddle_subscription} additionally
      * needs {@link AutoProlongOptions#subscriptionId}.
      *
-     * <p>Returned fields: {@code warning}, {@code autoProlong}, {@code quantity}, {@code ids[]},
-     * {@code days}, {@code paymentId}, {@code chargeDate} and {@code dateEnd}. For {@code ipv6}
-     * the whole order is switched on at once, so {@code quantity}/{@code ids} may cover more
-     * proxies than were sent — they are not an echo of the request.
+     * <p>Returned fields: {@code warning}, {@code autoProlong}, {@code quantity}, {@code ipIds[]}
+     * (the proxies actually affected, as {@code id} of {@code proxy/list}), {@code orderIds[]}
+     * (their orders), {@code days}, {@code paymentId}, {@code chargeDate} and {@code dateEnd}.
+     * They are not an echo of the request: for ipv6/mix/mix_isp the whole order is switched at
+     * once, so {@code quantity}/{@code ipIds} cover every active proxy of the orders sent.
      *
      * @param type               ipv4, ipv6, mobile, isp, mix, mix_isp or resident
      * @param autoProlongOptions selection, period and payment system
      * @return The new automatic-extension state.
-     * @throws IllegalArgumentException for {@code scraper}, or with no payment system set
+     * @throws IllegalArgumentException for {@code scraper}, with any selection for
+     *                                  {@code resident}, or with no payment system set
      * @throws Exception Error
      */
     public Map autoProlongEnable(String type, AutoProlongOptions autoProlongOptions) throws Exception {
@@ -1961,15 +2126,19 @@ public class Api {
     /**
      * Enable automatic extension for the given proxies.
      *
-     * @param type     The type of the proxies (ipv4, ipv6, mobile, isp, mix, mix_isp).
-     * @param ipsOrIds The addresses themselves or ObjectId strings — routed by shape.
+     * @param type     The proxy type: ipv4, isp, mobile, ipv6, mix or mix_isp.
+     * @param ipsOrIds Addresses or proxy ids for ipv4/isp/mobile, order ids for
+     *                 ipv6/mix/mix_isp — routed by shape and type exactly as in
+     *                 {@link #prolongCalc(String, List, String, String)}.
      * @param periodId Period ObjectId, or the period code — the period the charge will buy.
      * @return The new automatic-extension state.
+     * @throws IllegalArgumentException when the list mixes proxy ids and addresses for
+     *                                  ipv4/isp/mobile, or is not empty for {@code resident}
      * @throws Exception Error
      */
     public Map autoProlongEnable(String type, List ipsOrIds, String periodId) throws Exception {
         AutoProlongOptions autoProlongOptions = new AutoProlongOptions();
-        routeProlongTargets(autoProlongOptions, ipsOrIds);
+        routeProlongTargets(type, autoProlongOptions, ipsOrIds);
         autoProlongOptions.periodId = periodId;
         return autoProlongEnable(type, autoProlongOptions);
     }
@@ -1979,7 +2148,7 @@ public class Api {
      *
      * <p>Replaces the removed {@code resident/autorenew/enable}. The body is the package-shaped
      * one — a payment system and nothing else — and the answer reports {@code quantity: 1} with
-     * an empty {@code ids}.
+     * empty {@code ipIds} and {@code orderIds}.
      *
      * @param tarifId The tariff currently on the package, or null.
      * @return The new automatic-extension state.
@@ -2007,12 +2176,15 @@ public class Api {
      * <p>Neither the period nor the payment system is required here — only the selection. Both
      * are cleared, so a later {@link #autoProlongEnable(String, AutoProlongOptions)} has to send
      * them again; in the answer {@code days}, {@code paymentId} and {@code chargeDate} are null
-     * while {@code dateEnd} still shows how long the proxies keep working.
+     * while {@code dateEnd} still shows how long the proxies keep working. {@code ipIds[]} and
+     * {@code orderIds[]} report what was actually switched off, as on enable.
      *
      * @param type               ipv4, ipv6, mobile, isp, mix, mix_isp or resident
      * @param autoProlongOptions the selection to switch off
      * @return The new automatic-extension state.
-     * @throws IllegalArgumentException for {@code scraper}
+     * @throws IllegalArgumentException for {@code scraper}, or with any selection for
+     *                                  {@code resident} — a disable meant for a few addresses
+     *                                  would switch off the whole package
      * @throws Exception Error
      */
     public Map autoProlongDisable(String type, AutoProlongOptions autoProlongOptions) throws Exception {
@@ -2024,14 +2196,18 @@ public class Api {
     /**
      * Disable automatic extension for the given proxies.
      *
-     * @param type     The type of the proxies (ipv4, ipv6, mobile, isp, mix, mix_isp).
-     * @param ipsOrIds The addresses themselves or ObjectId strings — routed by shape.
+     * @param type     The proxy type: ipv4, isp, mobile, ipv6, mix or mix_isp.
+     * @param ipsOrIds Addresses or proxy ids for ipv4/isp/mobile, order ids for
+     *                 ipv6/mix/mix_isp — routed by shape and type exactly as in
+     *                 {@link #prolongCalc(String, List, String, String)}.
      * @return The new automatic-extension state.
+     * @throws IllegalArgumentException when the list mixes proxy ids and addresses for
+     *                                  ipv4/isp/mobile, or is not empty for {@code resident}
      * @throws Exception Error
      */
     public Map autoProlongDisable(String type, List ipsOrIds) throws Exception {
         AutoProlongOptions autoProlongOptions = new AutoProlongOptions();
-        routeProlongTargets(autoProlongOptions, ipsOrIds);
+        routeProlongTargets(type, autoProlongOptions, ipsOrIds);
         return autoProlongDisable(type, autoProlongOptions);
     }
 
@@ -2051,16 +2227,44 @@ public class Api {
     private Map prepareAutoProlong(String type, AutoProlongOptions autoProlongOptions, boolean paymentRequired) {
         assertAutoProlongType(type);
         Map map = prepareProlong(autoProlongOptions);
+        assertNoResidentSelection(type, map);
         if (paymentRequired) {
             assertAutoProlongPayment(map);
         }
         return map;
     }
 
+    /** Поля выборки продления: прокси (ipIds, ips) и заказы (orderIds). */
+    private static final List<String> PROLONG_SELECTION_KEYS =
+            Collections.unmodifiableList(Arrays.asList("ipIds", "ips", "orderIds"));
+
+    /**
+     * Резидентка продлевается пакетом целиком, выборки у неё нет вовсе. Любую выборку — список,
+     * ipIds, ips или orderIds — отбиваем локально и НЕ выбрасываем молча: disable, адресованный
+     * нескольким адресам, иначе выключил бы автопродление всего пакета. Пустые значения выборкой
+     * не считаются: они выбрасываются на всех путях одинаково.
+     *
+     * @param type тип из сегмента пути
+     * @param json тело запроса автопродления
+     * @throws IllegalArgumentException если для resident задана хоть какая-то выборка
+     */
+    protected static void assertNoResidentSelection(String type, Map json) {
+        if (!isResidentType(type) || json == null) {
+            return;
+        }
+        for (String key : PROLONG_SELECTION_KEYS) {
+            Object value = json.get(key);
+            if (value instanceof Collection ? hasFilledItem(value) : isFilled(value)) {
+                throw new IllegalArgumentException("resident auto-prolong applies to the whole package:"
+                        + " do not pass proxy or order ids (" + key + " was set)");
+            }
+        }
+    }
+
     /**
      * Скрапер автопродления НЕ поддерживает: пакет продлевают покупкой трафика через order/make,
-     * и сервер отвечает ровно этим текстом (ClientApiService.prepareAutoProlong, ветка
-     * isTariffBasedSection). Отбиваем локально — как и остальные заведомо отклонённые запросы.
+     * и autoprolong/* отвечает ровно этим текстом. Отбиваем локально — как и остальные заведомо
+     * отклонённые запросы.
      *
      * @param type тип из сегмента пути
      */
@@ -2180,8 +2384,8 @@ public class Api {
      * @throws Exception Error
      */
     public String proxyDownload(String type, String ext, String proto, String listId, String packageKey, String country, String ends) throws Exception {
-        // На маршруте /proxy/download/resident сервер (ClientApiService.getProxyDownload)
-        // разбирает package_key ТОЛЬКО при typeKey == "subresident". Молча отдавать выгрузку
+        // package_key учитывается ТОЛЬКО маршрутом /proxy/download/subresident: на
+        // /proxy/download/resident сервер его не смотрит. Молча отдавать выгрузку
         // родительского пакета вместо запрошенного субпакета — хуже, чем упасть здесь.
         if (packageKey != null && !packageKey.isBlank() && "resident".equalsIgnoreCase(String.valueOf(type).trim())) {
             throw new IllegalArgumentException("packageKey works on proxy/download/subresident only;"
@@ -2221,7 +2425,7 @@ public class Api {
 
     /**
      * Accepted values of the {@code type} field of {@code proxy/replace} — the reason of
-     * the replacement, mirroring the server enum {@code ProxyReplaceType}.
+     * the replacement.
      */
     public static final List<String> PROXY_REPLACE_TYPES = Collections.unmodifiableList(Arrays.asList(
             "NOT_WORK", "INCORRECT_LOCATION", "CANT_CHANGE_NETWORK", "LOW_SPEED", "CUSTOM"));
@@ -2257,9 +2461,9 @@ public class Api {
     }
 
     /**
-     * Повторяет серверную проверку из ClientApiService.replaceProxies:
-     * ProxyReplaceType.fromString(type) делает valueOf(type.toUpperCase()), а при CUSTOM
-     * дополнительно требует непустой comment (иначе ошибка "Set comment", code 503).
+     * Повторяет серверную проверку proxy/replace: причина сверяется со списком
+     * {@link #PROXY_REPLACE_TYPES} без учёта регистра, а при CUSTOM дополнительно нужен непустой
+     * comment (иначе ошибка "Set comment", code 503).
      * Проверяем локально, чтобы не тратить круг на заведомо отклонённый запрос.
      *
      * @param type    причина замены
@@ -2304,7 +2508,9 @@ public class Api {
      * {@code expired_at}, {@code auto_renew}, {@code auto_renew_payment_id} and
      * {@code rotation}. {@code expired_at} is a <b>string</b> in {@code dd.MM.yyyy HH:mm:ss} —
      * that is where this endpoint does differ from {@code residentsubuser/*}, which returns the
-     * same key as a PHP date object.
+     * same key as a date object {@code {date, timezone_type, timezone}} — {@code date} is UTC in
+     * {@code yyyy-MM-dd HH:mm:ss.SSSSSS}, {@code timezone_type} is always {@code 3},
+     * {@code timezone} is always {@code UTC}.
      *
      * @return map
      * @throws Exception Error
@@ -2337,10 +2543,9 @@ public class Api {
      * Optional filter fields: {@code login}, {@code date_start}, {@code date_end}.
      *
      * <p>When there is traffic, {@code data} is an object grouped by list login and usage time.
-     * When the period is <b>empty</b> the server sends an empty <b>array</b> {@code []} instead —
-     * byte-for-byte what v1 did, where an empty PHP associative array serializes to {@code []}
-     * rather than {@code {}}. That is a normal successful answer, so it is normalised to an empty
-     * map here; casting it straight to {@code Map} used to throw {@link ClassCastException}.
+     * When the period is <b>empty</b> the server sends an empty <b>array</b> {@code []} instead of
+     * an object. That is a normal successful answer, so it is normalised to an empty map here;
+     * casting it straight to {@code Map} used to throw {@link ClassCastException}.
      *
      * @param filter A free format map with the filter (may be null).
      * @return map, empty when the period holds no traffic
@@ -2587,7 +2792,7 @@ public class Api {
 
     /**
      * Ловушка, из-за которой понадобились перегрузки с Object: id резидентских листов —
-     * ЧИСЛОВОЙ (ListItemResponseDto.id это Long, а не ObjectId, как остальные id в v2),
+     * ЧИСЛОВОЙ (в ответе это целое число, а не ObjectId, как остальные id в v2),
      * а Gson разбирает нетипизированный JSON-number в Double. То есть
      * residentList().get(0).get("id") — это Double 561.0: приведение к Long роняет
      * ClassCastException, а приведение через intValue() у больших id теряет точность.
@@ -2632,7 +2837,9 @@ public class Api {
      * Create a resident subpackage.
      *
      * <p>Asymmetric field: {@code expired_at} is sent as a plain <b>string</b>, but comes
-     * back in the response as a PHP date <b>object</b>
+     * back in the response as a date <b>object</b> {@code {date, timezone_type, timezone}} —
+     * {@code date} is UTC in {@code yyyy-MM-dd HH:mm:ss.SSSSSS}, {@code timezone_type} is always
+     * {@code 3}, {@code timezone} is always {@code UTC}
      * ({@code {"date":"2026-12-31 23:59:59.000000","timezone_type":3,"timezone":"UTC"}}).
      * Read {@code ((Map) item.get("expired_at")).get("date")}, do not expect a string.
      *
@@ -2678,8 +2885,10 @@ public class Api {
      * @param rotation     rotation in seconds
      * @param trafficLimit traffic limit in bytes
      * @param isActive     active state
-     * @param expiredAt    expiration date as a string; the response returns it as a PHP date
-     *                     object ({@code date}/{@code timezone_type}/{@code timezone})
+     * @param expiredAt    expiration date as a string; the response returns it as a date object
+     *                     {@code {date, timezone_type, timezone}} — {@code date} is UTC in
+     *                     {@code yyyy-MM-dd HH:mm:ss.SSSSSS}, {@code timezone_type} is always
+     *                     {@code 3}, {@code timezone} is always {@code UTC}
      * @return map
      * @throws Exception Error
      */
@@ -2719,8 +2928,9 @@ public class Api {
      *
      * <p>Each item holds {@code package_key}, {@code rotation}, {@code traffic_limit},
      * {@code is_link_date}, {@code is_active}, the traffic counters, and
-     * {@code expired_at} as a PHP date <b>object</b>
-     * ({@code date}/{@code timezone_type}/{@code timezone}), not a string.
+     * {@code expired_at} as a date <b>object</b> {@code {date, timezone_type, timezone}} —
+     * {@code date} is UTC in {@code yyyy-MM-dd HH:mm:ss.SSSSSS}, {@code timezone_type} is always
+     * {@code 3}, {@code timezone} is always {@code UTC} — not a string.
      *
      * @return list
      * @throws Exception Error
@@ -2878,7 +3088,7 @@ public class Api {
      * an object; it is parsed back into a map here.
      *
      * @param packageKey subpackage key
-     * @param id         list id (the server DTO declares it as a string)
+     * @param id         list id (the API declares it as a string)
      * @return map
      * @throws Exception Error
      */
@@ -2960,6 +3170,14 @@ public class Api {
         return config;
     }
 
+    /**
+     * Replace the configuration.
+     *
+     * <p>The request queue belongs to this instance and is kept: pacing continues from the
+     * requests already sent, and the settings of the new configuration apply from the next request.
+     *
+     * @param config the configuration, with a non-blank key
+     */
     public void setConfig(Config config) {
         if (config == null || config.getKey() == null || config.getKey().isBlank()) {
             throw new IllegalArgumentException("config with a non-blank key is required");
@@ -2967,7 +3185,7 @@ public class Api {
         config.setBaseUri(resolveBaseUri(config.getBaseUri(), config.getKey()));
         this.config = config;
         // Уже заданный сеттером fingerprint не сбрасываем: конфиг меняют ради хоста и таймаутов,
-        // а молчаливая потеря значения проявилась бы только отказом резидентского заказа.
+        // а молчаливая потеря значения незаметно лишила бы заказы анти-фрод-проверки и атрибуции.
         if (config.getFingerprint() != null && !config.getFingerprint().isBlank()) {
             this.fingerprint = config.getFingerprint();
         }

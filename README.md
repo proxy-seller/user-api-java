@@ -12,10 +12,11 @@ Prebuilt jars for v2 live in
 `proxy-seller-user-api-2.0-standalone.jar` (fat jar, Gson included), plus the
 sources and javadoc jars. They are produced by `./gradlew build_standalone`.
 
-> ⚠️ **The jars in `dist/` are behind the sources** and predate `ProlongOptions.ips`,
-> `X-Fingerprint` and the `autoprolong/*` methods. Until they are regenerated
-> (`./gradlew build_standalone`), build from source or take the artifact from maven-central —
-> the examples in this README assume the current sources.
+> ⚠️ **The jars in `dist/` are behind the sources.** They predate `ProlongOptions.ipIds`,
+> `ips` and `orderIds`, `X-Fingerprint`, `orderList()` and the `autoprolong/*` methods, and their
+> renewal methods still send the removed `ids` field, which the server no longer reads — renewing
+> through them does not work. Until they are regenerated (`./gradlew build_standalone`), build
+> from source — the examples in this README assume the current sources.
 
 Requires **JDK 17+**. **Android is not supported** — see [Platform support](#platform-support).
 
@@ -38,25 +39,31 @@ Nothing else is required — the client talks to `https://proxy-seller.com/perso
 default. The api key is a **path segment** in v2
 (`https://proxy-seller.com/personal/api/v2/{apiKey}/...`), not a header.
 
+Requests are **paced by default**, so a loop of calls stays under the API's limits on its own —
+see [Rate limits and the request queue](#rate-limits-and-the-request-queue).
+
 ### Paying for orders
 
-Every order and renewal needs a payment system. Take one from `balancePaymentsList()` and set it
-once:
+Every order and renewal needs a payment system, and `order/make` and `prolong/*` accept exactly
+two: the internal balance and a saved card. A one-off card checkout needs a browser redirect that
+a programmatic client cannot complete. Set it once, by code:
 
 ```java
-List<Map> payments = (List<Map>) api.balancePaymentsList();   // [{id=69e7…, name=PayPal}, …]
-api.setPaymentId((String) payments.get(0).get("id"));
+api.setPaymentCode("balance");                  // the internal balance
+// api.setPaymentCode("paddle_subscription");   // the saved card — needs an active card subscription
 ```
 
-This is the one place where an id is unavoidable: several payment systems share the same internal
-code (a single `cryptomus` covers "USDT (TRC-20)", "All cryptocurrencies" and more), so the code
-cannot tell them apart. Everywhere else you use human-readable codes.
+Do not take it from `balancePaymentsList()`. That list holds the systems for **topping up** the
+balance (`balanceAdd`, see [Balance](#balance)), and the internal balance itself is never in it.
+An entry from it is refused by `order/make` with
+`Set paymentId = <id>(inner balance) OR paymentId = <id>(subscribed card)`.
 
-### Residential and scraper orders need a fingerprint
+### Optional `X-Fingerprint`
 
-`order/make` carries an `X-Fingerprint` header. Most sections ignore it, but **residential and
-scraper orders are not created without it at all** — the order service answers `Header
-X-Fingerprint is required` and nothing is ordered. Set it once:
+`order/make` can carry an `X-Fingerprint` header: a stable, opaque identifier of your
+installation, used for anti-fraud checks and affiliate attribution when present. It is
+**optional** — no section, residential and scraper included, refuses an order without it. The SDK
+sends the header when you give it a value and leaves it out otherwise:
 
 ```java
 Api api = new Api(new Config("YOUR_API_KEY", null, "your-installation-id"));
@@ -66,14 +73,10 @@ api.setFingerprint("your-installation-id");
 api.orderMakeResident("tarif-code", null, "your-installation-id");
 ```
 
-Any opaque string is accepted — the server does not validate its shape — but it must be a
+Any opaque string is accepted — the server does not validate its shape — but keep it a
 **stable identifier of your installation**. The SDK deliberately does not generate one for you: a
-value randomized per process would break the anti-fraud and affiliate attribution the header
+value randomized per process would defeat the anti-fraud and affiliate attribution the header
 exists for.
-
-Call `orderMakeResident(...)` or a scraper order without a fingerprint and the SDK throws
-`IllegalArgumentException` locally, rather than spending a round trip on a request the server is
-certain to reject.
 
 <details>
 <summary>Pointing the client at another host, and timeouts</summary>
@@ -165,15 +168,15 @@ That is the whole rule:
 | `rotationId` | minutes as a string (`0` = By Link) — the one `id` that is a number, not a code | `operators.*[].rotations[].id` **is** the minutes, `name` is `"5 minutes"` / `"By Link"` |
 | `mixId` | mix package code — exact match, or its ObjectId | `reference/list/mix` → `quantities[].id`, e.g. `europe-2-mix_IPv4`. First argument of `orderCalcMix`/`orderMakeMix` |
 | `tarifId` | resident tariff code — exact match, e.g. `1-gb` | `resident.tarifs[]` → `id` |
-| `paymentId` | payment-system ObjectId — the one unavoidable id | `balancePaymentsList()` → `id`, see [Paying for orders](#paying-for-orders) |
+| `paymentId` | orders and renewals: the code `balance` or `paddle_subscription`; `balanceAdd`: a top-up system's ObjectId | orders: fixed codes, see [Paying for orders](#paying-for-orders); top-ups: `balancePaymentsList()` → `id` |
 
 ObjectIds are still accepted everywhere if you happen to have them; the
 reference simply no longer publishes them.
 
 Code resolution lives in `order/calc`, `order/make`, `prolong/calc` and
 `prolong/make`. Every other endpoint — `proxy/*`, `auth/*`, `balance/add`,
-`resident/*` — works with ids; the exception is renewal, which takes the proxy
-addresses (see [Renewing proxies](#renewing-proxies)).
+`resident/*` — works with ids; the exception is renewal of ipv4, isp and mobile,
+which also takes the proxy addresses (see [Renewing proxies](#renewing-proxies)).
 
 ### The one exception: resident list ids
 
@@ -262,20 +265,30 @@ Map orders = api.orderList(filters);
 Map all = api.orderList();       // the same call with no filters at all
 ```
 
-On the wire the filters keep the snake_case names of v1 — `order_id`, `start_date`,
-`end_date`, `status`, `is_extend`, `auto_order`, `page`, `limit`, `sort_by`, `order` —
-because the same endpoint answers legacy-API clients through the reverse mirror.
+Query filters and response fields of `order/list` use snake_case names — `order_id`,
+`start_date`, `end_date`, `status`, `is_extend`, `auto_order`, `page`, `limit`, `sort_by`,
+`order` — not the camelCase of `proxy/list`.
 
 `data` is not a flat list but a `metadata` + `items` pair, and `metadata` is always
 there: without `limit` it reports `total_pages = 1`, `current_limit = 0` and the whole
 list in `items`. `summ` and `items[].price` are **strings with the currency already in
 them** (`$25.00`), `auto_order` and `is_extend` are `Y`/`N` rather than booleans, and
-the dates are ISO 8601 with offset (`2026-09-01T14:15:26+00:00`). `id` is the legacy bitrix number as a string; the
-ObjectId is `order_id` — the same value `proxyList()` returns as `order_id`.
+the dates are ISO 8601 with offset (`2026-09-01T14:15:26+00:00`). `id` is a numeric order
+ID sent as a string; the ObjectId is `order_id` — the same value `proxyList()` returns as
+`order_id`, and the one that renews ipv6, mix and mix_isp (see
+[Renewing proxies](#renewing-proxies)).
 
 ## Renewing proxies
 
-Renew by the addresses themselves — the same strings `proxyList()` gives you. No ids to look up:
+What you pass follows the proxy type, and every value comes straight out of `proxyList()`:
+
+| type | what to pass | sent as |
+|---|---|---|
+| `ipv4`, `isp` | the `ip` field (`1.2.3.4`), or the proxy `id` | `ips` / `ipIds` |
+| `mobile` | `ip` + `:` + `port_http` + `:` + `port_socks`, or the proxy `id` | `ips` / `ipIds` |
+| `ipv6`, `mix`, `mix_isp` | the `order_id` field — `orderList()` returns it too | `orderIds` |
+
+ipv4, isp and mobile renew per proxy, by the addresses themselves — no ids to look up:
 
 ```java
 Map list = (Map) api.proxyList("ipv4");
@@ -290,49 +303,96 @@ api.prolongCalc("ipv4", ips, "1m", null);   // price first
 api.prolongMake("ipv4", ips, "1m", null);   // deducts money
 ```
 
-`prolongCalc` shows the price; `prolongMake` charges the balance. If the balance is short,
-`prolongMake` throws an `ApiException` with the server's warning — it never reports a renewal that
-did not happen.
+`prolongCalc` shows the price; `prolongMake` charges the balance. The period takes a code
+(`"1m"`), same fallback as `order/*`, and the fourth argument is a coupon.
 
-What you pass follows the proxy type, and every value comes straight out of `proxyList()`:
+The list overloads route every value by its shape and by the type. A value with a dot or a colon
+is an address and goes out as `ips`; any other value is an id — `ipIds` for ipv4, isp and mobile,
+`orderIds` for ipv6, mix and mix_isp. Blank values are dropped, and an empty field is not sent at
+all.
 
-| type | what to pass |
-|---|---|
-| `ipv4`, `isp`, `mix`, `mix_isp` | the `ip` field — `1.2.3.4` |
-| `ipv6` | the `ip` field — `host:port`, e.g. `1.2.3.4:26000` |
-| `mobile` | `ip` + `:` + `port_http` + `:` + `port_socks` |
+For ipv4, isp and mobile pass either ids or addresses in one call, not both. When a request
+carries both `ipIds` and `ips`, the server renews by `ipIds` and ignores the addresses, so they
+would silently drop out of a paid renewal. The SDK therefore throws an `IllegalArgumentException`
+before anything is sent:
 
-For `ipv6` the `ip` field already carries the gateway and its port (`1.2.3.4:26000`), while
-`ip_only` holds the gateway alone — so pass `ip` as it comes, exactly like every other type.
+```
+Mixing proxy ids and addresses in one call is not supported: pass either ids or addresses
+```
 
-ObjectId strings work for every type, and a mixed list works — each value is routed by its shape.
-The period takes a code (`"1m"`), same fallback as `order/*`, and the fourth argument is a coupon.
+For ipv6, mix and mix_isp a mixed list is still routed — ids to `orderIds`, addresses to `ips` —
+and the server rejects the address part itself (see below).
+
+### ipv6, mix and mix_isp are renewed as whole orders by `orderIds`
+
+These products are sold and renewed only as whole orders, so they are selected by `order_id`, not
+by address. Every active proxy of that type in the given orders is renewed — for `mix` and
+`mix_isp`, the mix packages of those orders:
+
+```java
+Set<String> orders = new LinkedHashSet<>();
+for (Map item : (List<Map>) ((Map) api.proxyList("ipv6")).get("items")) {
+    orders.add((String) item.get("order_id"));   // many proxies, one order
+}
+
+api.prolongCalc("ipv6", new ArrayList<>(orders), "1m", null);
+api.prolongMake("ipv6", new ArrayList<>(orders), "1m", null);
+```
+
+If any of the orders is not yours or has no active proxy of that type — or no order is given at
+all — the whole request fails with `Incorrect orderIds` (code 29) and nothing is renewed. A
+selection field of the other kind is an error too, and the message names the field: addresses
+sent for these types get `[ips] is not applicable for ipv6: prolong by [orderIds]` (proxy ids in
+`ipIds` get the same with `[ipIds]`), and `orderIds` sent for ipv4, isp or mobile gets
+`[orderIds] is not applicable for ipv4: prolong by [ipIds]`.
+
+### What `prolongMake` returns
+
+```json
+{"orderId": "6a248de4717805635cf6057d",
+ "orderIds": ["6a248de4717805635cf6057d", "6a248de4717805635cf6058a"],
+ "total": 25.00,
+ "listBaseOrderNumbers": ["NS_1790059585687-no", "NS_1790059601234-kq"],
+ "balance": 100.50}
+```
+
+`orderIds` lists every renewed order — one request can renew several — as the same `order_id`
+values `proxyList()` and `orderList()` return; `orderId` is the first of them.
+`listBaseOrderNumbers` holds one base order number per renewed order or mix package, matching
+`base_order_number` in `orderList()`.
+
+If the balance is short, `prolongMake` throws an `ApiException` — it never reports a renewal that
+did not happen. The calculation, with the server's `warning`, is in `getResponseData()`.
 
 <details>
-<summary>Renewing part of a MIX order</summary>
+<summary>The full payload: <code>ProlongOptions</code></summary>
 
-A MIX order can be split into parts that renew independently. Those parts are addressed by id, and
-`ProlongOptions` is how you pass them:
+`ProlongOptions` sets every field directly, with no routing: `ipIds`, `ips`, `orderIds`,
+`coupon`, `periodId` / `periodCode` and a per-request `paymentId` / `paymentCode`.
 
 ```java
 ProlongOptions prolong = new ProlongOptions();
-prolong.orderSeparatorIds = java.util.List.of("SEPARATOR_ID");
+prolong.orderIds = List.of("ORDER_ID");   // ipv6 / mix / mix_isp; ipv4 / isp / mobile take ipIds or ips
 prolong.periodId = "1m";
-api.prolongCalc("mix", prolong);
+prolong.paymentCode = "balance";          // this request only
+api.prolongMake("mix", prolong);
 ```
 
-`ProlongOptions` also carries `ips`, `ids` and a per-request payment system.
+Blank values are dropped and an empty collection is not sent. Set only one of `ipIds` and `ips`:
+this class sends what you set, and when both arrive the server uses `ipIds`.
 
 </details>
 
 ## Automatic renewal
 
 `prolong/make` charges you now. `autoprolong/*` only arms a charge that happens later, without
-you present — so it is a separate branch of the API, not a flag on `prolong`.
+you present — so it is a separate branch of the API, not a flag on `prolong`. The selection is
+the same as for renewal: `ipIds` or `ips` for ipv4, isp and mobile, `orderIds` for ipv6, mix and
+mix_isp (see [Renewing proxies](#renewing-proxies)).
 
 ```java
 AutoProlongOptions auto = new AutoProlongOptions();
-auto.ips = List.of("1.2.3.4");
+auto.ips = List.of("1.2.3.4");                  // or auto.ipIds = List.of("PROXY_ID")
 auto.periodId = "1m";
 auto.paymentId = "balance";                     // mandatory here
 
@@ -341,12 +401,15 @@ api.autoProlongEnable("ipv4", auto);            // arm it
 api.autoProlongDisable("ipv4", auto);           // disarm it
 ```
 
-Shorter forms take the addresses directly, exactly like `prolongCalc`:
+Shorter forms take the values directly and route them exactly like `prolongCalc` — including the
+`IllegalArgumentException` for a list that mixes proxy ids and addresses on ipv4, isp and mobile:
 
 ```java
 api.autoProlongCalc("ipv4", List.of("1.2.3.4"), "1m");
 api.autoProlongEnable("ipv4", List.of("1.2.3.4"), "1m");
 api.autoProlongDisable("ipv4", List.of("1.2.3.4"));
+
+api.autoProlongEnable("mix", List.of("ORDER_ID"), "1m");   // order_id → orderIds
 ```
 
 `paymentId` is **mandatory** for `calc` and `enable` — the charge happens while you are away, so
@@ -362,10 +425,22 @@ api.autoProlongEnableResident();
 api.autoProlongDisableResident();
 ```
 
+Any selection with `resident` — a non-empty list, `ipIds`, `ips` or `orderIds` — throws an
+`IllegalArgumentException` before anything is sent:
+
+```
+resident auto-prolong applies to the whole package: do not pass proxy or order ids
+```
+
+The selection is never dropped silently: a disable meant for a few addresses would otherwise
+switch off automatic renewal of the whole package.
+
 Three things about the answers are worth knowing before you parse them:
 
-* **`ids` is not an echo.** For `ipv6` the whole order is switched at once, so `quantity` and
-  `ids` can cover more proxies than you sent.
+* **`ipIds` is not an echo.** `enable` and `disable` answer `ipIds[]` — the proxies actually
+  affected — and `orderIds[]`, their orders (both empty for resident). For ipv6, mix and mix_isp
+  the whole order is switched at once, so `quantity` and `ipIds` cover every active proxy of the
+  orders you sent.
 * **Not enough money is not an exception.** `calc` answers `status: "error"` with a *filled*
   `data` block and an empty `errors[]` — the same shape `prolong/calc` uses. Read `warning`.
 * **Residential fills different fields.** `days` and `chargeDate` are null there (a package
@@ -381,15 +456,19 @@ endpoint answers `Create new order to add traffic, prolong options not available
 ## Balance
 
 `balance/add` accepts **paymentId only** — unlike `order/*` and `prolong/*` it
-does not resolve stable payment codes. Take the id from `balancePaymentsList()`.
-Setting only `setPaymentCode(...)` and calling `balanceAdd` fails locally with a
-message saying so, instead of sending `paymentId: null`.
+does not resolve stable payment codes. Take the id from `balancePaymentsList()`: an id is
+unavoidable here, because several top-up systems share one internal code (a single
+`cryptomus` covers "USDT (TRC-20)", "All cryptocurrencies" and more). Setting only
+`setPaymentCode(...)` and calling `balanceAdd` fails locally with a message saying so,
+instead of sending `paymentId: null`.
 
 ```java
-api.setPaymentId("PAYMENT_SYSTEM_OBJECT_ID");
-System.out.println(api.balanceAdd(25.0));           // payment page url
-System.out.println(api.balanceAdd(25.0, "OTHER_PAYMENT_SYSTEM_ID"));
+System.out.println(api.balanceAdd(25.0, "PAYMENT_SYSTEM_OBJECT_ID"));   // payment page url
 ```
+
+Pass the top-up system per call. `setPaymentId(...)` followed by `balanceAdd(25.0)` works
+too, but that setting is also the payment system of every later order and renewal, which
+accept only `balance` or `paddle_subscription`.
 
 ### Auto top-up
 
@@ -514,8 +593,9 @@ api.residentSubUserListAdd("PACKAGE_KEY", "US list", "127.0.0.1",
         java.util.Map.of("ports", 1000, "ext", "txt"), 60);
 ```
 
-`expired_at` is asymmetric: you **send** a string, but it comes **back** as a PHP
-date object, so read the nested `date`:
+`expired_at` is asymmetric: you **send** a string, but it comes **back** as a date object
+`{date, timezone_type, timezone}` — `date` is UTC in `yyyy-MM-dd HH:mm:ss.SSSSSS`,
+`timezone_type` is always `3`, `timezone` is always `UTC` — so read the nested `date`:
 
 ```java
 for (Object pkg : api.residentSubUserPackages()) {
@@ -531,8 +611,12 @@ The delete endpoints answer with `data` as a JSON **string**
 ## Error handling
 
 Client API v2 answers with **HTTP 200 almost always** — business failures live
-inside the envelope `{status, data, errors}`. There is no HTTP 429: an exceeded
-rate limit is a 200 as well. Never branch on the HTTP status alone.
+inside the envelope `{status, data, errors}`. The API itself never answers HTTP 429:
+an exceeded rate limit is a 200 as well (see
+[the access-error triple](#access-failures-come-as-a-fixed-triple)). A 429 can only
+come from the edge in front of the API, and the client retries it for you — see
+[Rate limits and the request queue](#rate-limits-and-the-request-queue). Never branch
+on the HTTP status alone.
 
 The SDK turns any `status:"error"` envelope into an `ApiException` carrying the
 business code, `customData`, the HTTP status, the raw body, the `data` field and
@@ -579,6 +663,9 @@ tells you nothing about which of the three actually happened — walk
 }
 ```
 
+The client never retries this triple on its own: an exceeded limit cannot be told apart from a
+wrong key or IP.
+
 ### Other shapes
 
 * A calculation response with `status:"error"`, non-null `data` and an empty
@@ -588,6 +675,93 @@ tells you nothing about which of the three actually happened — walk
 * Responses that are not our envelope (a bare framework error page, a plain-text
   400) are reported with their own message — the SDK only treats a body with a
   **string** `status` as an envelope.
+
+## Rate limits and the request queue
+
+The client paces its own requests, so a program that calls the API in a loop stays under the
+limits without any code of its own. This is **on by default**.
+
+Every call belongs to one of three categories, decided by its endpoint — not by the HTTP method:
+the calculations are POST requests, but they change nothing.
+
+* **money** — `order/make`, `prolong/make/{type}`, `balance/add`: the `orderMake*` methods,
+  `prolongMake` and `balanceAdd`.
+* **write** — `autoprolong/enable/{type}`, `autoprolong/disable/{type}`, `auth/add`,
+  `auth/add/ip`, `auth/change`, `auth/delete`, `proxy/replace`, `proxy/comment/set`,
+  `balance/autotopup/set`, `resident/list/{add,delete,rename,rotation,tools}`,
+  `residentsubuser/{create,update,delete}` and
+  `residentsubuser/list/{add,delete,rename,rotation,tools}`: `autoProlongEnable*`,
+  `autoProlongDisable*`, `authAdd`, `authAddIp`, `authChange`, `authDelete`, `proxyReplace`,
+  `proxyCommentSet`, `balanceAutoTopupSet`, `residentListAdd` / `Rename` / `Rotation` /
+  `Tools` / `Delete`, `residentSubUserCreate` / `Update` / `Delete` and
+  `residentSubUserListAdd` / `Rename` / `Rotation` / `Tools` / `Delete`.
+* **read** — everything else: every list and get, `reference/list`, `proxy/download/*`,
+  `resident/package`, `resident/lists`, `resident/geo*`, `resident/consumption`,
+  `resident/traffic/details`, `residentsubuser/packages`, `residentsubuser/lists`, and all
+  calculations — `order/calc`, `prolong/calc/{type}`, `autoprolong/calc/{type}`.
+
+What the client does, with the defaults:
+
+1. **One window for everything.** At most `requestsPerMinute` (**1000**) requests start within
+   any 60 seconds — reads, writes and money calls together. It is a sliding window, not a token
+   bucket, so there is no burst on top of it: a request that would be the 1001st start within
+   60 seconds waits until the oldest of those starts is 60 seconds old.
+2. **One queue for writes and money.** Write and money calls go one at a time: the next one
+   starts only after the previous one has finished, and no earlier than `writeIntervalMillis`
+   (**1000 ms**) after the previous write or money call started. A money call also waits until
+   `moneyIntervalMillis` (**2000 ms**) have passed since the previous money call started — right
+   after a write it starts at whichever of the two ends later. Reads never wait for this queue,
+   only for the window.
+3. **HTTP 429 is retried.** A 429 comes from the edge in front of the API: the request never
+   reached the API, so repeating it is safe even for a money call. The client waits
+   `Retry-After` (seconds or an HTTP date; **2 s** when the header is missing or unreadable;
+   never more than **60 s**) and sends the request again, up to `maxRetries` (**3**) times.
+   After that the call fails with the usual `ApiException`, and `getHttpStatus()` is `429`. A
+   write or money call keeps its place in the queue while it is retried — nothing queued behind
+   it goes first — and every retry counts as a new start in the window.
+4. **Nothing else is retried.** Business errors reach you exactly as before, in particular:
+   * code **57**, `Prolong for this order is already in progress` — repeating a renewal on its
+     own could extend the order twice;
+   * the [access-error triple](#access-failures-come-as-a-fixed-triple) (code 503, one of its
+     entries `Request limit reached`) — it cannot be told apart from a wrong api key or an IP
+     outside the allowlist.
+
+   Other HTTP errors and network failures are not retried either.
+
+Waiting blocks the calling thread (a plain sleep, no busy loop). Calls from several threads on
+one `Api` instance are fine: their write and money calls are serialized in the queue, and their
+reads run in parallel.
+
+### Changing or disabling it
+
+The settings live on `Config`. They are read on every request, so they can also be changed on a
+live client through `api.getConfig()`:
+
+```java
+Config config = new Config("YOUR_API_KEY");
+config.setRequestsPerMinute(600);       // default 1000
+config.setWriteIntervalMillis(1_500);   // default 1000
+config.setMoneyIntervalMillis(3_000);   // default 2000
+config.setMaxRetries(5);                // default 3; 0 = fail on the first 429
+Api api = new Api(config);
+```
+
+```java
+config.setRateLimitEnabled(false);      // default true
+```
+
+With pacing disabled the client behaves exactly as it did without the queue: every request goes
+out at once, and an HTTP 429 fails immediately with `getHttpStatus() == 429`.
+
+### One queue per `Api` instance
+
+The queue lives in the `Api` object, and `setConfig(...)` keeps it. Two `Api` instances — or two
+processes — using the same api key know nothing about each other, and together they can exceed
+the limits that each of them keeps to. Share one instance between the threads of a process
+instead of creating one per thread or per task.
+
+When several processes do share a key, the server can still answer code 57 or the access-error
+triple. Handle both as you would without the queue — the client passes them through untouched.
 
 ## Platform support
 
@@ -721,12 +895,43 @@ breaks the most code.
 
 ## Changelog
 ```
+2.0.2
+! Behaviour change: requests are now paced by default (see "Rate limits and the request
+  queue"): at most 1000 request starts within any 60 s; write and money calls one at a time,
+  at least 1 s apart, money calls at least 2 s apart; an HTTP 429 is retried after Retry-After
+  up to 3 times. Code 57 and the access-error triple are never retried.
+  Config.setRateLimitEnabled(false) restores the previous behaviour
++ Config.setRateLimitEnabled / setRequestsPerMinute / setWriteIntervalMillis /
+  setMoneyIntervalMillis / setMaxRetries
+! ProlongOptions.ids renamed to ipIds; the server no longer reads ids
+! ProlongOptions.orderSeparatorIds / orderSeparatorId removed, the server no longer reads
+  them. ipv6, mix and mix_isp are renewed as whole orders through the new
+  ProlongOptions.orderIds (order_id from proxyList / orderList)
+! ipIds / ips select ipv4, isp and mobile only; ipv6 is no longer renewed by host:port.
+  A selection field of the other kind is rejected by the server, e.g.
+  [ipIds] is not applicable for ipv6: prolong by [orderIds]
+! the List overloads of prolongCalc / prolongMake / autoProlongCalc / autoProlongEnable /
+  autoProlongDisable route by type: an id goes out as orderIds for ipv6 / mix / mix_isp
+  and as ipIds for the other types, an address as ips
+! autoprolong/enable and autoprolong/disable answer ipIds[] instead of ids[], plus orderIds[]
+! a List overload that mixes proxy ids and addresses for ipv4 / isp / mobile now throws
+  IllegalArgumentException: the server renews by ipIds and ignores ips when both arrive, so
+  the addresses would silently drop out of a paid renewal
+! autoprolong with type resident throws IllegalArgumentException on any selection (a
+  non-empty list, ipIds, ips or orderIds): automatic renewal there covers the whole package,
+  and a selection is never dropped silently
+! X-Fingerprint is optional: orderMakeResident / orderMakeScraper and orderMake no longer
+  throw locally when it is missing, as 2.0.1 did — the header is sent only when set, and the
+  server does not refuse API-key orders without it. A call that used to throw now places the order
++ prolong/make answers orderIds[] with every renewed order; orderId is the first of them,
+  and listBaseOrderNumbers holds one base order number per renewed order or mix package
++ ProlongOptions no longer sends an empty selection collection or blank values
+
 2.0.1
 + orderList() / orderList(OrderListOptions) for GET order/list. Ten optional filters,
-  all of them under the v1 snake_case names (order_id, start_date, end_date, status,
-  is_extend, auto_order, page, limit, sort_by, order), because legacy-API clients reach
-  the same endpoint through the reverse mirror. data is a metadata + items pair, and
-  summ / items[].price are currency strings, not numbers
+  all of them sent under snake_case names (order_id, start_date, end_date, status,
+  is_extend, auto_order, page, limit, sort_by, order). data is a metadata + items pair,
+  and summ / items[].price are currency strings, not numbers
 + autoProlongCalc / autoProlongEnable / autoProlongDisable (+ ...Resident variants)
   for autoprolong/{calc,enable,disable}/{type}
 + X-Fingerprint on order/make: Config(key, baseUri, fingerprint), setFingerprint(),
