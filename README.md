@@ -901,6 +901,13 @@ breaks the most code.
 ## Changelog
 ```
 2.0.2
+! proxyList latest = "Y" (server side) now means the latest order of the requested type -
+  of the MIX orders for mix / mix_isp - instead of the latest order of the whole account,
+  which left the list empty whenever another type had been bought last. Without a type it is
+  still one latest order for the whole response. It no longer empties resident and scraper
++ proxyList orderId (server side) also accepts the numeric id of an orderList row,
+  base_order_number and an earlier order_number of a renewed order, not only order_id and
+  the exact current order_number
 ! Behaviour change: requests are now paced by default (see "Rate limits and the request
   queue"): at most 1000 request starts within any 60 s; write and money calls one at a time,
   at least 1 s apart, money calls at least 2 s apart; an HTTP 429 is retried after Retry-After

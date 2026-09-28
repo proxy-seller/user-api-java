@@ -2321,8 +2321,16 @@ public class Api {
      * Get the list of proxies of a certain type with filters.
      *
      * @param type    The type of proxies (ipv4, ipv6, mobile, isp, mix, resident).
-     * @param latest  Y/N, only the latest order
-     * @param orderId Filter by order id (MongoDB ObjectId string, not a number)
+     * @param latest  "Y" - only the proxies of the latest order among those the request returns:
+     *                with a type, the latest order of that type ("mix" / "mix_isp" - the latest
+     *                MIX order); without a type, one latest order for the whole response. The
+     *                latest order is the last one bought - a renewal does not count. Ignored when
+     *                orderId is set, no effect on resident and scraper; "N" or null - no filter
+     * @param orderId Filter by order: any order identifier the API returns - order_id (from
+     *                proxyList or orderList), the numeric id of an orderList row (a renewal row
+     *                selects the order it renews), or the order number: the current order_number,
+     *                base_order_number, or an earlier number of a renewed order with an older
+     *                _e_&lt;hash&gt; suffix. An unknown order or one of another account gives empty lists
      * @param country Filter by country code
      * @param ends    Filter by expiration
      * @param page    Page number
