@@ -59,6 +59,10 @@ balance (`balanceAdd`, see [Balance](#balance)), and the internal balance itself
 An entry from it is refused by `order/make` with
 `Set paymentId = <id>(inner balance) OR paymentId = <id>(subscribed card)`.
 
+> A money call — `orderMake*`, `prolongMake`, `balanceAdd` — that ends in a timeout, a dropped
+> connection or an HTTP 5xx may still have gone through. Check before you call it again: see
+> [Timeouts and retries on payments](#timeouts-and-retries-on-payments).
+
 ### Optional `X-Fingerprint`
 
 `order/make` can carry an `X-Fingerprint` header: a stable, opaque identifier of your
@@ -88,9 +92,13 @@ or a URL with `{apiKey}` is also accepted:
 ```java
 Config config = new Config("YOUR_API_KEY", "http://localhost:7995/personal/api/v2/");
 config.setConnectTimeoutMillis(10_000);
-config.setReadTimeoutMillis(30_000);
+config.setReadTimeoutMillis(30_000);         // every call
+config.setMoneyReadTimeoutMillis(120_000);   // order/make, prolong/make, balance/add
 Api api = new Api(config);
 ```
+
+Money calls wait for the longer of the two read timeouts — see
+[Timeouts and retries on payments](#timeouts-and-retries-on-payments).
 
 A custom `baseUri` that is neither the v2 root nor contains the key is rejected
 with an `IllegalArgumentException` at construction time, instead of silently
@@ -626,8 +634,9 @@ come from the edge in front of the API, and the client retries it for you — se
 on the HTTP status alone.
 
 The SDK turns any `status:"error"` envelope into an `ApiException` carrying the
-business code, `customData`, the HTTP status, the raw body, the `data` field and
-**the complete `errors` array**.
+business code, `customData`, the HTTP status, the response body, the `data` field and
+**the complete `errors` array** — with the api key masked in all of them (see
+[The api key never appears in an error](#the-api-key-never-appears-in-an-error)).
 
 ```java
 try {
@@ -675,13 +684,33 @@ wrong key or IP.
 
 ### Other shapes
 
-* A calculation response with `status:"error"`, non-null `data` and an empty
-  `errors` array is an actionable warning (for example insufficient funds on
-  `prolong/calc`): that `data` is returned normally, not thrown.
+* A calculation response — `order/calc`, `prolong/calc`, `autoprolong/calc` — with
+  `status:"error"`, non-null `data` and an empty `errors` array is an actionable warning
+  (for example insufficient funds): that `data` is returned normally, not thrown.
+* A money or write call succeeds **only** with `status:"success"`. The same warning shape on
+  `order/make`, `prolong/make` or a write is an `ApiException` — the `warning` is its message,
+  `data` is in `getResponseData()`. So is a 2xx answer without the envelope (an HTML page, an
+  empty body, a 204, cut-off JSON), with the message
+  `Unexpected response (no JSON envelope, HTTP 200) to order/make; the request may have been executed — check before retrying`
+  and the first 500 characters of the answer in `getResponseBody()`. On a money call that is an
+  unknown outcome — see [Timeouts and retries on payments](#timeouts-and-retries-on-payments).
 * Proxy exports return raw text; resident geo/ISP downloads return `byte[]`.
 * Responses that are not our envelope (a bare framework error page, a plain-text
   400) are reported with their own message — the SDK only treats a body with a
   **string** `status` as an envelope.
+
+### The api key never appears in an error
+
+The key is a path segment, and an error answer can repeat the path: a framework 404 with
+`"path": "/personal/api/v2/<key>/..."`, the same path in lower case, a server message that
+quotes it. Every `ApiException` shows the key as `***` — in `getMessage()`, `getResponseBody()`,
+`getErrors()`, `getResponseData()` and `getCustomData()`; as typed, URL-encoded and in any letter
+case. A network failure keeps the JDK exception as its cause, unless that exception's own text
+holds the key: then the cause is an `IOException` with the same stack trace, the original class
+name and the masked text.
+
+The JDK itself still logs request URLs, key included, if you turn on `FINE` logging for
+`sun.net.www.protocol.http`.
 
 ## Rate limits and the request queue
 
@@ -733,7 +762,10 @@ What the client does, with the defaults:
      entries `Request limit reached`) — it cannot be told apart from a wrong api key or an IP
      outside the allowlist.
 
-   Other HTTP errors and network failures are not retried either.
+   Other HTTP errors and network failures are not retried either — and neither does the
+   transport resend anything: a request with a body goes out in fixed-length streaming mode, so
+   the JDK never repeats it after a dropped connection. Out of the box `HttpURLConnection` would:
+   a POST by default, a PUT or DELETE always.
 
 Waiting blocks the calling thread (a plain sleep, no busy loop). Calls from several threads on
 one `Api` instance are fine: their write and money calls are serialized in the queue, and their
@@ -769,6 +801,54 @@ instead of creating one per thread or per task.
 
 When several processes do share a key, the server can still answer code 57 or the access-error
 triple. Handle both as you would without the queue — the client passes them through untouched.
+
+## Timeouts and retries on payments
+
+`order/make`, `prolong/make/{type}` and `balance/add` move money, and a failure on the way back
+does not undo them. When such a call ends in a **timeout**, a **dropped connection**, an **HTTP 5xx**
+or a **2xx answer without the envelope**, its outcome is unknown: the order may have been created
+and paid, the renewal applied, the card charged.
+
+* **The SDK never repeats these calls on its own**, and neither does the transport. The one
+  exception is an HTTP 429 from the edge in front of the API — that request never reached the API
+  (see [Rate limits and the request queue](#rate-limits-and-the-request-queue)).
+* **Money calls wait longer.** A large order can keep the server busy for well over 30 seconds, so
+  a money call waits up to `moneyReadTimeoutMillis` (**120 s**) for its answer, while every other
+  call keeps `readTimeoutMillis` (**30 s**). A money call waits for the longer of the two, so
+  raising `readTimeoutMillis` raises it as well; `0` in either of them waits forever.
+
+  ```java
+  config.setMoneyReadTimeoutMillis(180_000);   // default 120 000
+  ```
+* **What you get** is an `ApiException`. After a timeout or a dropped connection
+  `getHttpStatus()` is `null` and `getCause()` is the `IOException` — a
+  `java.net.SocketTimeoutException` for a timeout. After a 5xx `getHttpStatus()` is that status.
+  A 2xx without the envelope has the message `Unexpected response (no JSON envelope, ...`.
+* **Look before you repeat the call:**
+  * `order/make` — the newest orders in `orderList()` (`sortBy = "date_insert"`,
+    `order = "desc"`), or the proxies in `proxyList(type)`;
+  * `prolong/make` — the expiry dates in `proxyList(type)`, or the renewal in `orderList()`
+    (`isExtend = "Y"`);
+  * `balance/add` — `balance()`: with a saved card (`paddle_subscription`) the card may already be
+    charged; with other systems the answer was a payment link, and asking again makes another one.
+
+```java
+try {
+    api.orderMakeResident("1-gb", null);
+} catch (ApiException e) {
+    boolean unknownOutcome = e.getHttpStatus() == null          // timeout, dropped connection
+            || e.getHttpStatus() >= 500
+            || e.getMessage().startsWith("Unexpected response (no JSON envelope");
+    if (!unknownOutcome) {
+        throw e;                                                // the API answered: a business error
+    }
+    OrderListOptions newest = new OrderListOptions();
+    newest.sortBy = "date_insert";
+    newest.order = "desc";
+    newest.limit = 5;
+    System.out.println(api.orderList(newest));                  // is the order there? only then retry
+}
+```
 
 ## Platform support
 
@@ -903,6 +983,32 @@ breaks the most code.
 ## Changelog
 ```
 2.0.2
+! a request with a body is sent in fixed-length streaming mode, so the JDK no longer resends it
+  by itself after a dropped connection: HttpURLConnection used to repeat a POST (by default)
+  and every PUT / DELETE, and a dropped order/make reached the server twice - two orders, two
+  charges. Such a drop is now an ApiException and the request went out exactly once.
+  residentListTools (PUT without fields) now sends Content-Length: 0
+! money and write calls succeed only with status "success". status "error" with data and an
+  empty errors[] is an ApiException there (the warning is the message, data is in
+  getResponseData()) - it stays a returned warning on order/calc, prolong/calc and
+  autoprolong/calc. A 2xx answer without the JSON envelope (HTML, empty body, 204, cut-off
+  JSON, not an object) on a money or write call is an ApiException "Unexpected response (no JSON
+  envelope, HTTP <status>) to <endpoint>; the request may have been executed - check before
+  retrying" with the first 500 characters of the answer in getResponseBody(); it used to be
+  returned as a String and fail with ClassCastException. Reads and downloads are unchanged
++ Config.setMoneyReadTimeoutMillis, default 120 000 ms: order/make, prolong/make and
+  balance/add wait for the longer of it and readTimeoutMillis (30 s), every other call keeps
+  readTimeoutMillis. README: "Timeouts and retries on payments" - what an unknown outcome is
+  and what to check before repeating a money call
+! the api key is masked as *** in every ApiException - message, getResponseBody(),
+  getErrors(), getResponseData(), getCustomData() - as typed, URL-encoded and in any letter
+  case: error answers that repeat the request path (a framework 404, a lower-cased front 404,
+  a server message) used to carry it into logs. A transport exception whose text holds the key
+  (MalformedURLException) is no longer attached as the cause as is: the cause is an IOException
+  with its stack trace, class name and masked text. setConfig no longer shows the previous key
+  when it refuses a baseUri
+! the Maven Central publish workflow builds on JDK 17: the sources are compiled with
+  release 17, which JDK 11 cannot do
 ! proxyList latest = "Y" (server side) now means the latest order of the requested type -
   of the MIX orders for mix / mix_isp - instead of the latest order of the whole account,
   which left the list empty whenever another type had been bought last. Without a type it is

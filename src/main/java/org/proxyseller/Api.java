@@ -72,6 +72,13 @@ public class Api {
     /** Темп запросов этого экземпляра: окно, полоса записи и повторы 429 — см. {@link RateLimiter}. */
     private final RateLimiter rateLimiter;
 
+    /**
+     * Ключ, подставленный в baseUri при создании или в {@link #setConfig(Config)}, — именно он
+     * стоит в пути каждого запроса. Его маскируем в ошибках наравне с {@code config.getKey()}:
+     * после {@code config.setKey(...)} без {@code setConfig} в URL остаётся прежний.
+     */
+    private String urlKey;
+
     private String paymentId;
     private String paymentCode;
     private String generateAuth = "N";
@@ -100,6 +107,7 @@ public class Api {
         }
         config.setBaseUri(resolveBaseUri(config.getBaseUri(), config.getKey()));
         this.config = config;
+        this.urlKey = config.getKey();
         this.fingerprint = config.getFingerprint();
         this.rateLimiter = Objects.requireNonNull(rateLimiter, "rateLimiter");
     }
@@ -198,6 +206,12 @@ public class Api {
     /**
      * Send request to the server.
      *
+     * <p>A money or write call ({@code order/make}, {@code prolong/make/{type}},
+     * {@code balance/add}, {@code auth/*} changes and the like) succeeds only with a
+     * {@code status:"success"} envelope. Anything else — an error envelope, even one with
+     * {@code data} and an empty {@code errors}, or a 2xx answer without the envelope — is an
+     * {@link ApiException}. Reads return what the server sent, as before.
+     *
      * @param method  The HTTP method to use.
      * @param uri     The URI of the server.
      * @param options Additional options for the request.
@@ -207,7 +221,10 @@ public class Api {
     protected Object request(String method, String uri, RequestOptions options) throws Exception {
         HttpResponse response = execute(method, uri, options);
         ensureSuccessful(response);
-        return decodeEnvelopeOrRaw(response);
+        if (RateLimiter.classify(uri) == RateLimiter.Category.READ) {
+            return decodeEnvelopeOrRaw(response);
+        }
+        return decodeStrictEnvelope(response, uri);
     }
 
     /**
@@ -271,7 +288,7 @@ public class Api {
             connection = (HttpURLConnection) url.openConnection();
             connection.setRequestMethod(method.toUpperCase());
             connection.setConnectTimeout(config.getConnectTimeoutMillis());
-            connection.setReadTimeout(config.getReadTimeoutMillis());
+            connection.setReadTimeout(readTimeoutMillis(config, uri));
             connection.setRequestProperty("Accept", "application/json, text/plain, */*");
 
             // Заголовки вызова ставим ДО Content-Type: тот принадлежит транспорту, и переписать
@@ -295,12 +312,24 @@ public class Api {
             // отсутствие тела — нет. У GET тела быть не должно, а json там всегда пуст по
             // умолчанию, поэтому его отделяем по методу, а не по наполнению карты.
             boolean sendsBody = !"GET".equalsIgnoreCase(method);
-            if (sendsBody && options != null && options.getJson() != null) {
-                connection.setRequestProperty("Content-Type", "application/json; charset=UTF-8");
+            if (sendsBody) {
+                byte[] bodyBytes = new byte[0];
+                if (options != null && options.getJson() != null) {
+                    connection.setRequestProperty("Content-Type", "application/json; charset=UTF-8");
+                    bodyBytes = GSON.toJson(options.getJson()).getBytes(StandardCharsets.UTF_8);
+                }
+                // Потоковый режим с известной длиной — именно он запрещает JDK повторять запрос.
+                // Без него HttpURLConnection буферизует тело и, если соединение оборвалось без
+                // ответа, сам шлёт запрос ещё раз: POST — по sun.net.http.retryPost (по умолчанию
+                // true), DELETE и PUT — всегда. Сервер к этому моменту мог уже принять тело и
+                // создать заказ, и повтор стал бы вторым заказом и вторым списанием. В потоковом
+                // режиме такой обрыв — ApiException, а запрос ушёл ровно один раз. Запрос без
+                // полей (PUT resident/list/tools) идёт той же дорогой с пустым телом:
+                // Content-Length: 0, тела по-прежнему нет.
                 connection.setDoOutput(true);
-                byte[] jsonBytes = GSON.toJson(options.getJson()).getBytes(StandardCharsets.UTF_8);
+                connection.setFixedLengthStreamingMode(bodyBytes.length);
                 try (OutputStream outputStream = connection.getOutputStream()) {
-                    outputStream.write(jsonBytes);
+                    outputStream.write(bodyBytes);
                 }
             }
 
@@ -312,12 +341,47 @@ public class Api {
             return new HttpResponse(status, connection.getContentType(), body,
                     connection.getHeaderField("Retry-After"));
         } catch (IOException e) {
-            throw new ApiException("Request failed: " + e.getMessage(), null, null, e);
+            throw transportFailure(e);
         } finally {
             if (connection != null) {
                 connection.disconnect();
             }
         }
+    }
+
+    /**
+     * Таймаут чтения ответа. Денежному вызову — большее из {@link Config#getReadTimeoutMillis()} и
+     * {@link Config#getMoneyReadTimeoutMillis()} ({@code 0} — ждать без ограничения, это и есть
+     * самое долгое), остальным — {@code readTimeoutMillis}. Категория — из той же таблицы, что у
+     * темпа, {@link RateLimiter#classify(String)}.
+     *
+     * @param config настройки клиента
+     * @param uri    путь эндпоинта относительно корня с ключом
+     * @return миллисекунды для {@link HttpURLConnection#setReadTimeout(int)}
+     */
+    static int readTimeoutMillis(Config config, String uri) {
+        int read = config.getReadTimeoutMillis();
+        if (RateLimiter.classify(uri) != RateLimiter.Category.MONEY) {
+            return read;
+        }
+        int money = config.getMoneyReadTimeoutMillis();
+        return read == 0 || money == 0 ? 0 : Math.max(read, money);
+    }
+
+    /**
+     * Сетевой сбой как {@link ApiException}. Текст исключения JDK может повторять URL, а в нём
+     * ключ ({@code MalformedURLException} пишет адрес целиком), поэтому текст маскируем, а причину
+     * цепляем исходную, только если ключа нет и в ней — см. {@link KeyRedactor#sanitize(Throwable)}.
+     */
+    private ApiException transportFailure(IOException e) {
+        KeyRedactor redactor = redactor();
+        return new ApiException("Request failed: " + redactor.redact(e.getMessage()), null, null,
+                redactor.sanitize(e));
+    }
+
+    /** Маска ключа для ошибок: и того, что в URL, и того, что сейчас в конфиге. */
+    private KeyRedactor redactor() {
+        return new KeyRedactor(urlKey, config.getKey());
     }
 
     private String buildUrl(String uri, RequestOptions options) {
@@ -350,7 +414,13 @@ public class Api {
         return encodeQuery(value);
     }
 
-    private static String resolveBaseUri(String configuredBaseUri, String apiKey) {
+    /**
+     * @param configuredBaseUri baseUri из конфига: корень v2, шаблон с {@code {apiKey}} или полный URI с ключом
+     * @param apiKey            ключ, который подставляется в путь
+     * @param otherKeys         прежние ключи этого клиента — их, как и apiKey, в тексте отказа не показываем
+     * @return URI с ключом, оканчивающийся на {@code /}
+     */
+    private static String resolveBaseUri(String configuredBaseUri, String apiKey, String... otherKeys) {
         String encodedKey = encodePathSegment(apiKey);
         if (configuredBaseUri == null || configuredBaseUri.isBlank()) {
             return BASE_URL + encodedKey + "/";
@@ -374,7 +444,9 @@ public class Api {
         // не попадал в URL вообще, и вместо понятной ошибки клиент получал 404 либо
         // тройку "Error api key" на каждом вызове.
         if (!result.contains("/" + encodedKey + "/") && !result.contains("/" + apiKey + "/")) {
-            throw new IllegalArgumentException("baseUri \"" + configuredBaseUri
+            String[] keys = Arrays.copyOf(otherKeys, otherKeys.length + 1);
+            keys[otherKeys.length] = apiKey;
+            throw new IllegalArgumentException("baseUri \"" + new KeyRedactor(keys).redact(configuredBaseUri)
                     + "\" does not contain the api key. In Client API v2 the key is a path segment: pass"
                     + " the v2 root (.../personal/api/v2/), put {apiKey} into the template,"
                     + " or pass the complete per-key URI");
@@ -396,7 +468,7 @@ public class Api {
         }
     }
 
-    private static void ensureSuccessful(HttpResponse response) throws ApiException {
+    private void ensureSuccessful(HttpResponse response) throws ApiException {
         if (response.status >= 200 && response.status < 300) {
             return;
         }
@@ -409,8 +481,9 @@ public class Api {
                 throw apiExceptionFromSingleError(envelope, response.status, response.bodyAsString());
             }
         }
+        // Тело — как есть, но без ключа: 404 фреймворка и страницы эджа повторяют путь запроса.
         throw new ApiException("Request failed with HTTP " + response.status,
-                response.status, response.bodyAsString(), null);
+                response.status, redactor().redact(response.bodyAsString()), null);
     }
 
     /**
@@ -427,7 +500,7 @@ public class Api {
         return envelope != null && envelope.get("status") instanceof String;
     }
 
-    private static Object decodeEnvelopeOrRaw(HttpResponse response) throws ApiException {
+    private Object decodeEnvelopeOrRaw(HttpResponse response) throws ApiException {
         String body = response.bodyAsString();
         Map<String, Object> envelope = tryParseObject(body);
         if (!isEnvelope(envelope)) {
@@ -445,7 +518,61 @@ public class Api {
         throw apiExceptionFromEnvelope(envelope, response.status, body);
     }
 
-    private static void throwIfErrorEnvelope(HttpResponse response) throws ApiException {
+    /** Сколько символов тела ответа без конверта остаётся в {@link ApiException#getResponseBody()}. */
+    static final int BODY_EXCERPT_CHARS = 500;
+
+    /**
+     * Деньги и запись: успех — ТОЛЬКО конверт со {@code status:"success"}. Чтение прощает две
+     * формы, и обе здесь опасны:
+     * <ul>
+     *   <li>{@code status:"error"} с {@code data} и пустым {@code errors} — легальный ответ расчёта
+     *       (нехватка средств у prolong/calc и autoprolong/calc), но у make и записи так выглядел
+     *       бы несостоявшийся вызов, отданный как успех;</li>
+     *   <li>2xx без JSON-конверта (HTML эджа или captive portal, пустое тело, 204, обрезанный
+     *       JSON, не-объект) — чтение отдавало бы сырое тело строкой, и типизированный метод падал
+     *       с ClassCastException, хотя заказ мог быть уже создан и оплачен.</li>
+     * </ul>
+     * Обе — {@link ApiException}; у второй текст прямо говорит, что исход неизвестен. Тело в
+     * исключении — без ключа и не длиннее {@link #BODY_EXCERPT_CHARS} символов: маскируем ДО
+     * обрезки, иначе обрезка могла бы разрезать ключ, и его начало осталось бы видно.
+     *
+     * @param response ответ денежного или пишущего вызова
+     * @param uri      путь эндпоинта — для текста ошибки
+     * @return data успешного конверта
+     * @throws ApiException на всё, кроме status "success"
+     */
+    private Object decodeStrictEnvelope(HttpResponse response, String uri) throws ApiException {
+        String body = response.bodyAsString();
+        Map<String, Object> envelope = tryParseObject(body);
+        if (!isEnvelope(envelope)) {
+            throw new ApiException("Unexpected response (no JSON envelope, HTTP " + response.status + ") to "
+                    + endpoint(uri) + "; the request may have been executed — check before retrying",
+                    null, null, response.status, excerpt(redactor().redact(body)), null);
+        }
+        if ("success".equals(envelope.get("status"))) {
+            return envelope.get("data");
+        }
+        throw apiExceptionFromEnvelope(envelope, response.status, body);
+    }
+
+    /** Путь эндпоинта для текста ошибки: без ведущего слеша и строки запроса. */
+    private static String endpoint(String uri) {
+        String path = uri == null ? "" : uri.replaceFirst("^/+", "");
+        int query = path.indexOf('?');
+        return query >= 0 ? path.substring(0, query) : path;
+    }
+
+    private static String excerpt(String body) {
+        if (body == null || body.length() <= BODY_EXCERPT_CHARS) {
+            return body;
+        }
+        int end = Character.isHighSurrogate(body.charAt(BODY_EXCERPT_CHARS - 1))
+                ? BODY_EXCERPT_CHARS - 1
+                : BODY_EXCERPT_CHARS;
+        return body.substring(0, end) + "... (" + (body.length() - end) + " more chars)";
+    }
+
+    private void throwIfErrorEnvelope(HttpResponse response) throws ApiException {
         String body = response.bodyAsString();
         Map<String, Object> envelope = tryParseObject(body);
         if (isEnvelope(envelope) && "error".equals(envelope.get("status"))) {
@@ -464,9 +591,15 @@ public class Api {
         }
     }
 
-    private static ApiException apiExceptionFromEnvelope(Map<String, Object> envelope, int httpStatus, String body) {
-        Object responseData = envelope.get("data");
-        List<Map<String, Object>> errors = errorList(envelope.get("errors"));
+    /**
+     * Ошибка из конверта. Ключ маскируем во всём, что уходит наружу: в теле, в {@code data} и в
+     * каждой ошибке массива ({@code message}, {@code customData}) — сервер, повторяющий путь
+     * запроса в тексте исключения, иначе отдал бы его в логи вызывающего.
+     */
+    private ApiException apiExceptionFromEnvelope(Map<String, Object> envelope, int httpStatus, String body) {
+        KeyRedactor redactor = redactor();
+        Object responseData = redactor.redactValue(envelope.get("data"));
+        List<Map<String, Object>> errors = errorList(redactor.redactValue(envelope.get("errors")));
         Map<String, Object> firstError = errors.isEmpty() ? null : errors.get(0);
 
         String message = firstError != null && firstError.get("message") != null
@@ -474,7 +607,7 @@ public class Api {
                 : errorMessageFromData(responseData);
         Integer code = firstError == null ? null : integerValue(firstError.get("code"));
         Object customData = firstError == null ? null : firstError.get("customData");
-        return new ApiException(message, code, customData, httpStatus, body, responseData, errors);
+        return new ApiException(message, code, customData, httpStatus, redactor.redact(body), responseData, errors);
     }
 
     /**
@@ -504,14 +637,16 @@ public class Api {
         return result;
     }
 
-    private static ApiException apiExceptionFromSingleError(Map<String, Object> error, int httpStatus, String body) {
+    private ApiException apiExceptionFromSingleError(Map<String, Object> rawError, int httpStatus, String body) {
+        KeyRedactor redactor = redactor();
+        Map<?, ?> error = (Map<?, ?>) redactor.redactValue(rawError);
         Object messageValue = error.get("message") != null ? error.get("message") : error.get("error");
         String message = messageValue != null
                 ? String.valueOf(messageValue)
                 : "Client API returned HTTP " + httpStatus;
         Object customData = error.containsKey("customData") ? error.get("customData") : error.get("custom_data");
         return new ApiException(message, integerValue(error.get("code")), customData,
-                httpStatus, body, null);
+                httpStatus, redactor.redact(body), null);
     }
 
     private static String errorMessageFromData(Object data) {
@@ -1963,14 +2098,12 @@ public class Api {
     /**
      * Успех prolong/make — {@code data = {orderId, orderIds[], total, listBaseOrderNumbers[],
      * balance}}: orderIds — все продлённые заказы, orderId — первый из них. Нехватка средств
-     * приходит конвертом status="error" с расчётом и его warning в data; когда errors[] при этом
-     * заполнен, ApiException бросает уже разбор конверта. Но конверт status="error" с ПУСТЫМ
-     * errors[] и заполненным data — ровно та форма, которой prolong/calc отдаёт легитимный
-     * warning, — decodeEnvelopeOrRaw возвращает как данные, и несостоявшееся продление выглядело
-     * бы состоявшимся. Поэтому успех определяется непустым orderIds или непустым orderId, а всё
-     * остальное превращается в ApiException с warning в сообщении и data в getResponseData().
-     *
-     * order/make этим не страдает: ошибку он отдаёт только с заполненным errors[].
+     * приходит конвертом status="error" с расчётом и его warning в data. Такой конверт — и с
+     * заполненным errors[], и с ПУСТЫМ (ровно та форма, которой prolong/calc отдаёт легитимный
+     * warning), — бросает уже строгий разбор денежного ответа (decodeStrictEnvelope). Здесь
+     * остаётся последняя линия: конверт status="success" без продлённых заказов. Успех
+     * определяется непустым orderIds или непустым orderId, а всё остальное превращается в
+     * ApiException с warning в сообщении и data в getResponseData().
      *
      * @param data data из ответа prolong/make
      * @return те же data, если продление состоялось
@@ -3187,8 +3320,11 @@ public class Api {
         if (config == null || config.getKey() == null || config.getKey().isBlank()) {
             throw new IllegalArgumentException("config with a non-blank key is required");
         }
-        config.setBaseUri(resolveBaseUri(config.getBaseUri(), config.getKey()));
+        // Прежний ключ тоже маскируем: после config.setKey(новый) в baseUri остался старый, и
+        // текст отказа иначе показал бы его целиком.
+        config.setBaseUri(resolveBaseUri(config.getBaseUri(), config.getKey(), urlKey, this.config.getKey()));
         this.config = config;
+        this.urlKey = config.getKey();
         // Уже заданный сеттером fingerprint не сбрасываем: конфиг меняют ради хоста и таймаутов,
         // а молчаливая потеря значения незаметно лишила бы заказы анти-фрод-проверки и атрибуции.
         if (config.getFingerprint() != null && !config.getFingerprint().isBlank()) {

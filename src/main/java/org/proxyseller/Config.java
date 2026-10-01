@@ -6,6 +6,9 @@ public class Config {
     private String fingerprint;
     private int connectTimeoutMillis = 10_000;
     private int readTimeoutMillis = 30_000;
+    // Денежный вызов (большой MIX-заказ) сервер может делать дольше 30 с, а обрыв по таймауту
+    // не отменяет оплату — поэтому деньгам свой, более длинный таймаут чтения.
+    private int moneyReadTimeoutMillis = 120_000;
 
     // Темп запросов читается на КАЖДОМ запросе, поэтому его можно менять у живого клиента
     // (api.getConfig()) — volatile, чтобы изменение из другого потока было видно сразу.
@@ -87,11 +90,47 @@ public class Config {
         return readTimeoutMillis;
     }
 
+    /**
+     * How long to wait for the answer of a request, default 30 000 ms; {@code 0} waits forever.
+     * Money calls wait at least {@link #setMoneyReadTimeoutMillis(int) moneyReadTimeoutMillis}.
+     *
+     * @param readTimeoutMillis milliseconds, at least 0; default 30 000
+     */
     public void setReadTimeoutMillis(int readTimeoutMillis) {
         if (readTimeoutMillis < 0) {
             throw new IllegalArgumentException("readTimeoutMillis must be >= 0");
         }
         this.readTimeoutMillis = readTimeoutMillis;
+    }
+
+    /**
+     * How long a money call waits for its answer, default 120 000 ms.
+     *
+     * @return milliseconds
+     * @see #setMoneyReadTimeoutMillis(int)
+     */
+    public int getMoneyReadTimeoutMillis() {
+        return moneyReadTimeoutMillis;
+    }
+
+    /**
+     * How long a money call — {@code order/make}, {@code prolong/make/{type}} and
+     * {@code balance/add} — waits for its answer. The server may need well over 30 seconds for a
+     * large order, and giving up does not undo the payment: a timed-out money call has an
+     * <b>unknown outcome</b>, see the README section "Timeouts and retries on payments".
+     *
+     * <p>A money call waits for the longer of this value and
+     * {@link #setReadTimeoutMillis(int) readTimeoutMillis}, so raising the general timeout raises
+     * it for money calls too; {@code 0} in either of them waits forever. Every other call keeps
+     * {@code readTimeoutMillis}.
+     *
+     * @param moneyReadTimeoutMillis milliseconds, at least 0; default 120 000
+     */
+    public void setMoneyReadTimeoutMillis(int moneyReadTimeoutMillis) {
+        if (moneyReadTimeoutMillis < 0) {
+            throw new IllegalArgumentException("moneyReadTimeoutMillis must be >= 0");
+        }
+        this.moneyReadTimeoutMillis = moneyReadTimeoutMillis;
     }
 
     /**
