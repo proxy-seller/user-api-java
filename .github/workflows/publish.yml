@@ -27,4 +27,18 @@ jobs:
           echo "${{ secrets.GRADLE_PROPS }}" | base64 -d > ~/.gradle/gradle.properties
 
       - name: Publish
-        run: gradle publish
+        # gradlew лежит в git без флага исполнения, поэтому через bash.
+        run: bash ./gradlew publish
+
+      - name: Hand over to Central Portal
+        # Загрузка через OSSRH Staging API сама в портале не появится: её передаёт этот вызов,
+        # и только с того же IP, с которого шла загрузка, — поэтому он в этом же джобе.
+        # user_managed: сборка ждёт в портале (Deployments), Publish нажимается вручную.
+        run: |
+          U=$(grep '^sonatypeUsername=' ~/.gradle/gradle.properties | cut -d= -f2- | tr -d '\r')
+          P=$(grep '^sonatypePassword=' ~/.gradle/gradle.properties | cut -d= -f2- | tr -d '\r')
+          echo "::add-mask::$U"
+          echo "::add-mask::$P"
+          curl --fail-with-body -sS -X POST \
+            -H "Authorization: Bearer $(printf '%s:%s' "$U" "$P" | base64 -w0)" \
+            "https://ossrh-staging-api.central.sonatype.com/manual/upload/defaultRepository/com.proxy-seller?publishing_type=user_managed"

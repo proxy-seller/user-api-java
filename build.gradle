@@ -69,8 +69,12 @@ publishing {
     }
     repositories {
         maven {
-            def releasesRepoUrl = "https://s01.oss.sonatype.org/service/local/staging/deploy/maven2/"
-            def snapshotsRepoUrl = "https://s01.oss.sonatype.org/content/repositories/snapshots/"
+            // OSSRH (s01.oss.sonatype.org) закрыт 30.06.2025. Публикуем через совместимый слой
+            // Central Portal (OSSRH Staging API). Сам он загрузку в портал не передаёт — это делает
+            // шаг "Hand over to Central Portal" в .github/workflows/publish.yml. Логин и пароль —
+            // пара из User Token портала central.sonatype.com, а не старые учётные данные OSSRH.
+            def releasesRepoUrl = "https://ossrh-staging-api.central.sonatype.com/service/local/staging/deploy/maven2/"
+            def snapshotsRepoUrl = "https://central.sonatype.com/repository/maven-snapshots/"
             url = version.endsWith('SNAPSHOT') ? snapshotsRepoUrl : releasesRepoUrl
 
             credentials {
