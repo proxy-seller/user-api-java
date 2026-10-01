@@ -529,6 +529,38 @@ class ApiV2GuardTest {
         assertEquals(Map.of("paymentCode", "balance", "tarifId", "1-gb"), local.lastOptions.getJson());
     }
 
+    /**
+     * paddle_subscription без subscriptionId уходит на сервер: с одной привязанной картой он
+     * берёт её сам, а сколько карт на аккаунте, знает только он. Платёжку требуем по-прежнему.
+     */
+    @Test
+    void autoProlongPaddleSubscriptionNeedsNoSubscriptionIdLocally() throws Exception {
+        CapturingApi local = new CapturingApi(new Config("TEST_KEY"));
+        local.setPaymentCode("paddle_subscription");
+
+        local.autoProlongEnable("ipv4", List.of("1.2.3.4"), "1m");
+        assertEquals("autoprolong/enable/ipv4", local.lastUri);
+        assertEquals("paddle_subscription", local.lastOptions.getJson().get("paymentCode"));
+        assertFalse(local.lastOptions.getJson().containsKey("subscriptionId"));
+
+        local.autoProlongCalcResident();
+        assertEquals("autoprolong/calc/resident", local.lastUri);
+        assertEquals(Map.of("paymentCode", "paddle_subscription"), local.lastOptions.getJson());
+
+        AutoProlongOptions chosen = new AutoProlongOptions();
+        chosen.orderIds = List.of("6a248de4717805635cf6057d");
+        chosen.periodId = "1m";
+        chosen.subscriptionId = "sub_01hxyz";
+        local.autoProlongEnable("ipv6", chosen);
+        assertEquals("sub_01hxyz", local.lastOptions.getJson().get("subscriptionId"));
+
+        CapturingApi unpaid = new CapturingApi(new Config("TEST_KEY"));
+        IllegalArgumentException e = assertThrows(IllegalArgumentException.class,
+                () -> unpaid.autoProlongEnable("ipv4", List.of("1.2.3.4"), "1m"));
+        assertTrue(e.getMessage().startsWith("Set [paymentId]"), e.getMessage());
+        assertNull(unpaid.lastUri);
+    }
+
     // --- order/list: фильтры в snake_case, а не в camelCase proxy/list --------------
 
     /**

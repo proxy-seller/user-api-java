@@ -417,8 +417,10 @@ api.autoProlongEnable("mix", List.of("ORDER_ID"), "1m");   // order_id → order
 
 `paymentId` is **mandatory** for `calc` and `enable` — the charge happens while you are away, so
 the payment system cannot be guessed. Only `balance` and `paddle_subscription` are accepted: a
-one-off Paddle checkout needs a browser redirect a headless client cannot complete. With
-`paddle_subscription` also set `subscriptionId`.
+one-off Paddle checkout needs a browser redirect a headless client cannot complete.
+`paddle_subscription` charges the card saved on the account; set `subscriptionId` only when the
+account has several saved cards (the server answers `Set [subscriptionId]`), with one card it is
+picked automatically.
 
 Residential packages renew as a package, not as addresses — send no selection at all:
 
@@ -938,6 +940,11 @@ breaks the most code.
 + prolong/make answers orderIds[] with every renewed order; orderId is the first of them,
   and listBaseOrderNumbers holds one base order number per renewed order or mix package
 + ProlongOptions no longer sends an empty selection collection or blank values
+! autoProlongCalc / autoProlongEnable with paddle_subscription no longer require
+  subscriptionId locally, as 2.0.1 did: the server charges the card saved on the account
+  when there is exactly one, answers "Set [subscriptionId]" when there are several and
+  "No saved card on the account: add a card in your account or use [paymentId] balance"
+  when there is none. paymentId stays mandatory
 
 2.0.1
 + orderList() / orderList(OrderListOptions) for GET order/list. Ten optional filters,

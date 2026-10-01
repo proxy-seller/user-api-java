@@ -2101,8 +2101,9 @@ public class Api {
      * <p>Nothing is charged now — the call arms the charge and binds the period and the payment
      * system to the selected proxies. {@code paymentId} is <b>mandatory</b> here (unlike
      * {@code prolong/calc}): the charge happens while you are not there. Only {@code balance} and
-     * {@code paddle_subscription} are accepted, and {@code paddle_subscription} additionally
-     * needs {@link AutoProlongOptions#subscriptionId}.
+     * {@code paddle_subscription} are accepted. With {@code paddle_subscription} the server
+     * charges the card saved on the account; {@link AutoProlongOptions#subscriptionId} is needed
+     * only when the account has several saved cards.
      *
      * <p>Returned fields: {@code warning}, {@code autoProlong}, {@code quantity}, {@code ids[]}
      * (the proxies actually affected, as {@code id} of {@code proxy/list}), {@code orderIds[]}
@@ -2285,8 +2286,9 @@ public class Api {
     /**
      * Платёжка на calc и enable ОБЯЗАТЕЛЬНА — в отличие от prolong/calc, где она опциональна:
      * списание произойдёт без клиента, и «по умолчанию с баланса» было бы догадкой за него.
-     * Сервер отвечает "Set [paymentId]", допускает только balance и paddle_subscription, а для
-     * подписки дополнительно требует subscriptionId.
+     * Сервер отвечает "Set [paymentId]" и допускает только balance и paddle_subscription.
+     * subscriptionId здесь не спрашиваем: с одной привязанной картой сервер берёт её сам, а
+     * сколько карт на аккаунте, видно только ему ("Set [subscriptionId]", если их несколько).
      *
      * @param json тело запроса автопродления
      */
@@ -2298,11 +2300,6 @@ public class Api {
                     + " not there, so the payment system cannot be guessed. Only balance and"
                     + " paddle_subscription are accepted — use setPaymentCode(\"balance\"),"
                     + " setPaymentId(...) or the paymentId/paymentCode field of AutoProlongOptions");
-        }
-        String payment = (isFilled(code) ? code : id).toString().trim();
-        if ("paddle_subscription".equals(payment) && !isFilled(json.get("subscriptionId"))) {
-            throw new IllegalArgumentException("Set [subscriptionId]: paddle_subscription charges a"
-                    + " Paddle subscription, and it has to belong to this account");
         }
     }
 
