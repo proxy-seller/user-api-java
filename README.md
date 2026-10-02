@@ -898,6 +898,8 @@ breaks the most code.
 * Payment systems are chosen by `setPaymentId(...)` — several of them share one internal code, so a code cannot tell them apart. `setPaymentCode(...)` still works for `order/*` and `prolong/*`, but not for `balanceAdd`, which resolves `paymentId` only.
 * `proxyReplace`'s `type` is the replacement reason, not the proxy type.
 * `proxyList()` and `referenceList()` without arguments now hit `proxy/list` and `reference/list`.
+* Ids and payment systems are strings: `setPaymentId(String)`, `balanceAdd(Double, String)`, `orderCalcIpv4(String countryId, String periodId, Long quantity, …)`. 1.x took `int` / `Integer` there.
+* Errors are thrown. 1.x printed the stack trace of a non-200 answer and returned `null`, so `balance()` failed with a `NullPointerException`; 2.x throws `ApiException` with the server's message, `getErrors()`, `getCode()` and `getHttpStatus()`.
 
 ## Methods available
 
@@ -981,8 +983,19 @@ breaks the most code.
 * residentSubUserListDelete
 
 ## Changelog
+
+Maven Central has `2.0` (2026-10-01) and `2.0.1`. The `2.0` jar contains all three `2.0` parts
+below; they were written while v2 was still in development, when parts 3 and 2 were planned as
+2.0.2 and 2.0.1, and nothing was published in between.
+
 ```
-2.0.2
+2.0.1 (2026-10-02)
+! proxyList(type, latest, orderId, country, ends, page, perPage) with a null or blank type goes
+  to the typeless proxy/list, so the filters work across all types. It used to request
+  proxy/list/null and fail with "this type not allowed here" (22002); proxyList(null) is
+  the same as proxyList() now
+
+2.0, part 3 of 3
 ! a request with a body is sent in fixed-length streaming mode, so the JDK no longer resends it
   by itself after a dropped connection: HttpURLConnection used to repeat a POST (by default)
   and every PUT / DELETE, and a dropped order/make reached the server twice - two orders, two
@@ -1041,18 +1054,18 @@ breaks the most code.
   non-empty list, ids, ips or orderIds): automatic renewal there covers the whole package,
   and a selection is never dropped silently
 ! X-Fingerprint is optional: orderMakeResident / orderMakeScraper and orderMake no longer
-  throw locally when it is missing, as 2.0.1 did — the header is sent only when set, and the
+  throw locally when it is missing, as part 2 did — the header is sent only when set, and the
   server does not refuse API-key orders without it. A call that used to throw now places the order
 + prolong/make answers orderIds[] with every renewed order; orderId is the first of them,
   and listBaseOrderNumbers holds one base order number per renewed order or mix package
 + ProlongOptions no longer sends an empty selection collection or blank values
 ! autoProlongCalc / autoProlongEnable with paddle_subscription no longer require
-  subscriptionId locally, as 2.0.1 did: the server charges the card saved on the account
+  subscriptionId locally, as part 2 did: the server charges the card saved on the account
   when there is exactly one, answers "Set [subscriptionId]" when there are several and
   "No saved card on the account: add a card in your account or use [paymentId] balance"
   when there is none. paymentId stays mandatory
 
-2.0.1
+2.0, part 2 of 3
 + orderList() / orderList(OrderListOptions) for GET order/list. Ten optional filters,
   all of them sent under snake_case names (order_id, start_date, end_date, status,
   is_extend, auto_order, page, limit, sort_by, order). data is a metadata + items pair,
@@ -1070,7 +1083,7 @@ breaks the most code.
 ! *Code no longer overrides a paired *Id for mixId, operatorId, rotationId and tarifId —
   the server gives the id priority there, and the SDK was inverting it
 
-2.0
+2.0, part 1 of 3
 Client API v2. Breaking changes:
 ! base url moved to /personal/api/v2/, the api key is a path segment
 ! all ids are strings (MongoDB ObjectId); numeric v1 ids no longer resolve

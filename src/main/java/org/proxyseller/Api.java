@@ -2439,7 +2439,8 @@ public class Api {
     /**
      * Get the list of proxies of a certain type.
      *
-     * @param type The type of proxies (ipv4, ipv6, mobile, isp, mix, resident).
+     * @param type The type of proxies (ipv4, ipv6, mobile, isp, mix, resident); null or blank -
+     *             all types, the same as {@link #proxyList()}.
      * @return The list of proxies.
      * @throws Exception Error
      */
@@ -2450,7 +2451,10 @@ public class Api {
     /**
      * Get the list of proxies of a certain type with filters.
      *
-     * @param type    The type of proxies (ipv4, ipv6, mobile, isp, mix, resident).
+     * @param type    The type of proxies (ipv4, ipv6, mobile, isp, mix, resident); null or blank -
+     *                all types: the filters then go to the typeless proxy/list. Before 2.0.1 null
+     *                was sent as the path segment proxy/list/null and refused
+     *                ("this type not allowed here").
      * @param latest  "Y" - only the proxies of the latest order among those the request returns:
      *                with a type, the latest order of that type ("mix" / "mix_isp" - the latest
      *                MIX order); without a type, one latest order for the whole response. The
@@ -2479,7 +2483,10 @@ public class Api {
         putIfNotNull(map, "per_page", perPage);
         options.setQuery(map);
 
-        return ((Map) (request("get", "proxy/list/" + encodePathSegment(type), options)));
+        String path = type == null || type.trim().isEmpty()
+                ? "proxy/list"
+                : "proxy/list/" + encodePathSegment(type);
+        return ((Map) (request("get", path, options)));
     }
 
     /**
