@@ -570,6 +570,19 @@ api.proxyDownload("subresident", "txt", "HTTPS", null, "PACKAGE_KEY", null, null
 api.proxyDownloadResident("LIST_ID", "txt", 1000);   // parent package
 ```
 
+Residential lines take the connection scheme in `protocol` (`http` or `socks5`) and the
+gateway in `host`. With `txt` a line becomes `socks5://login:password@host:port`, `csv` keeps
+its columns, and a custom template gets the value in `%protocol%`; without `protocol` the lines
+have no scheme, as before. Login, password and ports are the same for both protocols.
+`socks5` also carries UDP and HTTP/3 (QUIC) to websites. Gateways: `res.proxy-seller.com`
+(Europe, the default), `us.res.proxy-seller.com`, `asia.res.proxy-seller.com` - pick the one
+closest to your server. This is not `proto`, which selects IPv4 ports:
+
+```java
+api.proxyDownloadResident("LIST_ID", "txt", 1000, "socks5", "us.res.proxy-seller.com");
+api.proxyDownload("subresident", "txt", null, null, "PACKAGE_KEY", null, null, "http", null);
+```
+
 ## Resident
 
 `resident/geo` and `resident/geo/isp` return **file attachments** (`geo.json` and
@@ -989,6 +1002,12 @@ below; they were written while v2 was still in development, when parts 3 and 2 w
 2.0.2 and 2.0.1, and nothing was published in between.
 
 ```
+Unreleased
++ proxyDownloadResident(listId, ext, maxLine, protocol, host) and
+  proxyDownload(type, ext, proto, listId, packageKey, country, ends, protocol, host): the
+  connection scheme (http / socks5) and the gateway in residential lines. The shorter overloads
+  send neither, so their output does not change
+
 2.0.1 (2026-10-02)
 ! proxyList(type, latest, orderId, country, ends, page, perPage) with a null or blank type goes
   to the typeless proxy/list, so the filters work across all types. It used to request

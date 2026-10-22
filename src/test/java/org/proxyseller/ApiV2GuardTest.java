@@ -129,6 +129,39 @@ class ApiV2GuardTest {
         assertTrue(e.getMessage().contains("subresident"), e.getMessage());
     }
 
+    // --- protocol и host: схема и шлюз в строках резидентов, это не proto ------------
+
+    @Test
+    void residentDownloadSendsProtocolAndHost() throws Exception {
+        CapturingApi local = new CapturingApi(new Config("TEST_KEY"));
+        local.proxyDownloadResident("561", "txt", 10, "socks5", "us.res.proxy-seller.com");
+        assertEquals("proxy/download/resident", local.lastUri);
+        assertEquals("socks5", local.lastOptions.getQuery().get("protocol"));
+        assertEquals("us.res.proxy-seller.com", local.lastOptions.getQuery().get("host"));
+        assertFalse(local.lastOptions.getQuery().containsKey("proto"));
+    }
+
+    @Test
+    void subresidentDownloadSendsProtocolAndHost() throws Exception {
+        CapturingApi local = new CapturingApi(new Config("TEST_KEY"));
+        local.proxyDownload("subresident", "txt", null, null, "PKG_KEY", null, null, "http", "asia.res.proxy-seller.com");
+        assertEquals("proxy/download/subresident", local.lastUri);
+        assertEquals("http", local.lastOptions.getQuery().get("protocol"));
+        assertEquals("asia.res.proxy-seller.com", local.lastOptions.getQuery().get("host"));
+        assertEquals("PKG_KEY", local.lastOptions.getQuery().get("package_key"));
+    }
+
+    @Test
+    void shortDownloadOverloadsSendNeitherProtocolNorHost() throws Exception {
+        CapturingApi local = new CapturingApi(new Config("TEST_KEY"));
+        local.proxyDownloadResident("561", "txt", 10);
+        assertFalse(local.lastOptions.getQuery().containsKey("protocol"));
+        assertFalse(local.lastOptions.getQuery().containsKey("host"));
+        local.proxyDownload("subresident", "txt", null, null, "PKG_KEY", null, null);
+        assertFalse(local.lastOptions.getQuery().containsKey("protocol"));
+        assertFalse(local.lastOptions.getQuery().containsKey("host"));
+    }
+
     // --- ext: сервер отвечает голым 400 мимо конверта -------------------------------
 
     @Test
@@ -622,6 +655,13 @@ class ApiV2GuardTest {
             lastUri = uri;
             lastOptions = options;
             return new LinkedHashMap<String, Object>();
+        }
+
+        @Override
+        protected String requestRaw(String method, String uri, RequestOptions options) {
+            lastUri = uri;
+            lastOptions = options;
+            return "";
         }
     }
 

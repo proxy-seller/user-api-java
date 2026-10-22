@@ -2529,6 +2529,32 @@ public class Api {
      * @throws Exception Error
      */
     public String proxyDownload(String type, String ext, String proto, String listId, String packageKey, String country, String ends) throws Exception {
+        return proxyDownload(type, ext, proto, listId, packageKey, country, ends, null, null);
+    }
+
+    /**
+     * Export proxies of a certain type, with filters and, for residential lines, the connection
+     * scheme and the gateway.
+     *
+     * @param type       The type of proxies (ipv4, ipv6, mobile, isp, mix, resident, subresident).
+     * @param ext        txt/csv
+     * @param proto      HTTPS/SOCKS — IPv4 ports; residential lines ignore it
+     * @param listId     only for resident, if not set - will return ip from all sheets
+     * @param packageKey Subpackage key. Honoured by {@code subresident} only — the literal
+     *                   {@code resident} route ignores it and exports the parent package.
+     * @param country    Filter by country code
+     * @param ends       Filter by expiration
+     * @param protocol   resident and subresident only: {@code http} or {@code socks5}. With txt a
+     *                   line becomes {@code socks5://login:password@host:port}, a custom template
+     *                   gets it in {@code %protocol%}; null — lines without a scheme, as before
+     * @param host       resident and subresident only: the gateway — {@code res.proxy-seller.com}
+     *                   (the default), {@code us.res.proxy-seller.com}, {@code asia.res.proxy-seller.com}
+     * @return String The exported proxies in the specified format.
+     * @throws IllegalArgumentException when packageKey is combined with type {@code resident}
+     * @throws Exception Error
+     */
+    public String proxyDownload(String type, String ext, String proto, String listId, String packageKey, String country, String ends,
+                                String protocol, String host) throws Exception {
         // package_key учитывается ТОЛЬКО маршрутом /proxy/download/subresident: на
         // /proxy/download/resident сервер его не смотрит. Молча отдавать выгрузку
         // родительского пакета вместо запрошенного субпакета — хуже, чем упасть здесь.
@@ -2545,6 +2571,8 @@ public class Api {
         putIfNotNull(map, "package_key", packageKey);
         putIfNotNull(map, "country", country);
         putIfNotNull(map, "ends", ends);
+        putIfNotNull(map, "protocol", protocol);
+        putIfNotNull(map, "host", host);
         options.setQuery(map);
         return requestRaw("get", "proxy/download/" + encodePathSegment(type), options);
     }
@@ -2559,11 +2587,34 @@ public class Api {
      * @throws Exception Error
      */
     public String proxyDownloadResident(String listId, String ext, Integer maxLine) throws Exception {
+        return proxyDownloadResident(listId, ext, maxLine, null, null);
+    }
+
+    /**
+     * Export the resident proxy list with the connection scheme and the gateway in the lines.
+     * Login, password and ports are the same for both protocols: the gateway detects the protocol
+     * on connect. {@code socks5} also carries UDP and HTTP/3 (QUIC) to websites.
+     *
+     * @param listId   The list ID
+     * @param ext      txt/csv
+     * @param maxLine  Maximum number of lines
+     * @param protocol {@code http} or {@code socks5}. With txt a line becomes
+     *                 {@code socks5://login:password@host:port}, csv does not change, a custom
+     *                 template gets it in {@code %protocol%}; null — lines without a scheme, as before.
+     *                 This is not {@code proto} of {@link #proxyDownload}, which selects IPv4 ports
+     * @param host     The gateway: {@code res.proxy-seller.com} (the default),
+     *                 {@code us.res.proxy-seller.com}, {@code asia.res.proxy-seller.com}
+     * @return String The exported proxies.
+     * @throws Exception Error
+     */
+    public String proxyDownloadResident(String listId, String ext, Integer maxLine, String protocol, String host) throws Exception {
         RequestOptions options = new RequestOptions();
         LinkedHashMap<Object, Object> map = new LinkedHashMap<>();
         putIfNotNull(map, "id", listId);
         putIfNotNull(map, "ext", assertExt(ext));
         putIfNotNull(map, "maxLine", maxLine);
+        putIfNotNull(map, "protocol", protocol);
+        putIfNotNull(map, "host", host);
         options.setQuery(map);
         return requestRaw("get", "proxy/download/resident", options);
     }
